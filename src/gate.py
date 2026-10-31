@@ -41,6 +41,10 @@ DEFAULTS = {
     # Upstream for traffic that is not Claude's. Empty means DIRECT; a value like
     # http://127.0.0.1:7897 keeps the user's existing Clash in the path.
     "main_proxy": "",
+    # Kernel-level capture without pf: mihomo creates a utun device and takes
+    # over routes. Needs root, and conflicts with any other TUN client.
+    "tun_enabled": False,
+    "tun_stack": "gvisor",
 }
 
 # Domains that must always leave through the pinned node, even when they arrive
@@ -108,6 +112,12 @@ def settings(data):
     result["expected_ip"] = expected.strip()
 
     result["main_proxy"] = parse_main_proxy(result.get("main_proxy"))
+
+    tun = result["tun_enabled"]
+    if type(tun) is not bool:
+        raise ValueError("tun_enabled 必须是布尔值")
+    if result["tun_stack"] not in ("gvisor", "system", "mixed"):
+        raise ValueError("tun_stack 只能是 gvisor、system 或 mixed")
     return result
 
 
@@ -362,6 +372,18 @@ def render_config(node, options, token):
     }
     if options.get("interface_name"):
         config["interface-name"] = options["interface_name"]
+
+    if options.get("tun_enabled"):
+        # auto-route makes mihomo add the routes itself, so no pf and no
+        # per-application setup is needed. dns-hijack keeps name resolution
+        # inside the tunnel instead of leaking to the local resolver.
+        config["tun"] = {
+            "enable": True,
+            "stack": options.get("tun_stack", "gvisor"),
+            "auto-route": True,
+            "auto-detect-interface": True,
+            "dns-hijack": ["any:53"],
+        }
     return config
 
 

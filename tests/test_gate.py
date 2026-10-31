@@ -47,6 +47,15 @@ class SettingsTests(unittest.TestCase):
     def test_expected_ip_is_trimmed(self):
         self.assertEqual(gate.settings({"expected_ip": "  198.51.100.7 "})["expected_ip"], "198.51.100.7")
 
+    def test_tun_settings_validation(self):
+        self.assertFalse(gate.settings({})["tun_enabled"])
+        self.assertTrue(gate.settings({"tun_enabled": True})["tun_enabled"])
+        for value in ("yes", 1, None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                gate.settings({"tun_enabled": value})
+        with self.assertRaises(ValueError):
+            gate.settings({"tun_stack": "lwip"})
+
     def test_main_proxy_normalisation(self):
         self.assertEqual(gate.parse_main_proxy(""), "")
         self.assertEqual(gate.parse_main_proxy("direct"), "")
@@ -137,6 +146,17 @@ class RenderTests(unittest.TestCase):
         with_iface = gate.render_config(gate.validate_node(NODE),
                                         gate.settings({**OPTIONS, "interface_name": "en0"}), "tok")
         self.assertEqual(with_iface["interface-name"], "en0")
+
+    def test_tun_is_absent_by_default(self):
+        self.assertNotIn("tun", self.config)
+
+    def test_tun_enabled_adds_kernel_capture(self):
+        config = gate.render_config(gate.validate_node(NODE),
+                                    gate.settings({**OPTIONS, "tun_enabled": True}), "tok")
+        self.assertTrue(config["tun"]["enable"])
+        self.assertTrue(config["tun"]["auto-route"])
+        self.assertEqual(config["tun"]["stack"], "gvisor")
+        self.assertEqual(config["tun"]["dns-hijack"], ["any:53"])
 
     def test_ss_node_renders_cipher_not_uuid(self):
         node = gate.validate_node({"server": "203.0.113.10", "port": 8388, "type": "ss",
