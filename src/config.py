@@ -218,3 +218,8 @@ class ConfigManager:
     @property
     def gate_v2rayn_db(self):
         return (self.config.get("gate_v2rayn_db") or "").strip()
+
+    @property
+    def gate_dir(self):
+        """Gate state lives next to this config file, never at an import-time path."""
+        return os.path.join(os.path.dirname(self.path), "gate")

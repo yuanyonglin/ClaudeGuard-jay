@@ -21,9 +21,24 @@ def validate_proxy(data):
     return value
 
 
+def gate_proxy(data):
+    """The gate's proxy URL when gate mode is on, else None.
+
+    Gate mode wins over the manual cli_http_proxy setting: the whole point is
+    that Claude's traffic leaves through the pinned node, so a user-configured
+    proxy would silently bypass it.
+    """
+    if not data.get('gate_enabled'):
+        return None
+    port = data.get('gate_proxy_port', 17899)
+    if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
+        raise ValueError('gate_proxy_port 必须是 1024～65535 之间的整数')
+    return f'http://127.0.0.1:{port}'
+
+
 def cli_environment(data, inherited):
     env = dict(inherited)
-    proxy = validate_proxy(data)
+    proxy = gate_proxy(data) or validate_proxy(data)
     if proxy:
         for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
             env[key] = proxy

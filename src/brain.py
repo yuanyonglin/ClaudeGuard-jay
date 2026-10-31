@@ -44,17 +44,37 @@ def daemon_is_up():
     return read_daemon_state() is not None
 
 
+def gate_verdict(config):
+    """Gate mode: the pinned-exit verdict replaces the IP whitelist.
+
+    A missing or stale state file is "offline", not "allowed": the gate only
+    proves anything while its supervisor keeps publishing.
+    """
+    from src import gate as gate_lib
+
+    state = gate_lib.read_state(getattr(config, "gate_dir", None))
+    if state is None:
+        return "offline", None, "门卫状态未发布或已过期，请运行 claudeguard gate start"
+    ip = state.get("expected_ip") or None
+    if state.get("state") == "READY":
+        return "allowed", ip, None
+    return "blocked", ip, state.get("reason") or "门卫未就绪"
+
+
 def get_verdict(config, timeout=2.0, allow_fallback=True):
     """
     Returns (verdict, ip, err), verdict ∈ "allowed"/"blocked"/"offline".
 
-    Order: protection off → allowed; the daemon's verdict (instant); else, when
-    allow_fallback, our own configured check. allow_fallback=False returns
-    "offline" while the daemon is down — for tight loops that would rather skip a
-    tick than block on the network.
+    Order: protection off → allowed; gate mode → the gate's published verdict;
+    the daemon's verdict (instant); else, when allow_fallback, our own configured
+    check. allow_fallback=False returns "offline" while the daemon is down — for
+    tight loops that would rather skip a tick than block on the network.
     """
     if not config.protection_enabled:
         return "allowed", None, None
+
+    if getattr(config, "gate_enabled", False):
+        return gate_verdict(config)
 
     if policy.advanced(config.config):
         result = policy.check({**config.config, "ip_check_mode": config.ip_check_mode}, Path(config.path).parent)

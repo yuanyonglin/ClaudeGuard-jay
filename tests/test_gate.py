@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -236,6 +237,56 @@ class VerifyTests(unittest.TestCase):
 
     def test_fresh_is_false_before_any_success(self):
         self.assertFalse(self.gate.fresh())
+
+
+class PublishTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.gate = gate.Gate(directory=self.temp.name, options=OPTIONS)
+
+    def test_publish_writes_a_private_state_file(self):
+        data = self.gate.publish()
+        path = gate.state_path(self.temp.name)
+        self.assertTrue(path.exists())
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertIn("updated_at", data)
+        self.assertEqual(gate.read_state(self.temp.name)["state"], data["state"])
+
+    def test_missing_state_reads_as_none(self):
+        self.assertIsNone(gate.read_state(self.temp.name))
+
+    def test_stale_state_reads_as_none(self):
+        self.gate.publish()
+        later = time.time() + 1000
+        self.assertIsNone(gate.read_state(self.temp.name, max_age=45, now=lambda: later))
+        self.assertIsNotNone(gate.read_state(self.temp.name, max_age=45))
+
+    def test_watch_publishes_each_iteration(self):
+        self.gate.running = lambda: True
+
+        def fake_verify():
+            self.gate.state = "READY"
+            self.gate.reason = "ok"
+            self.gate.last_verified = time.time()
+            return self.gate.status()
+
+        self.gate.verify = fake_verify
+        results = gate.run_watch(self.gate, iterations=2, sleep=lambda _: None)
+        self.assertEqual([item["state"] for item in results], ["READY", "READY"])
+        self.assertEqual(gate.read_state(self.temp.name)["state"], "READY")
+
+    def test_watch_publishes_blocked_instead_of_raising(self):
+        self.gate.running = lambda: True
+
+        def boom():
+            raise RuntimeError("upstream gone")
+
+        self.gate.verify = boom
+        result = gate.run_watch(self.gate, iterations=1)[0]
+        self.assertEqual(result["state"], "BLOCKED")
+        self.assertIn("upstream gone", result["reason"])
+        self.assertEqual(gate.read_state(self.temp.name)["state"], "BLOCKED")
 
 
 class DiscoveryTests(unittest.TestCase):

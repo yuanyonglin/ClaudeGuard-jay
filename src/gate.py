@@ -621,9 +621,75 @@ class Gate:
             "mihomo": self.mihomo,
         }
 
+    def publish(self, status=None):
+        """Write the verdict where every consumer reads it.
+
+        Same idea as the daemon's state.json: one file, written atomically, so the
+        wrapper, the launcher and the CLI can never disagree about the gate.
+        """
+        data = dict(status or self.status())
+        data["updated_at"] = time.time()
+        self.ensure_dir()
+        path = self.dir / "state.json"
+        temp = path.with_suffix(".tmp")
+        temp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.chmod(temp, 0o600)
+        os.replace(temp, path)
+        return data
+
     def fresh(self, interval=None):
         """True while the last successful verification is still within its window."""
         if self.state != "READY":
             return False
         interval = interval or self.options["verify_interval"]
         return time.time() - self.last_verified <= interval
+
+
+def state_path(directory=None):
+    return Path(directory or os.path.join(CONFIG_DIR, "gate")) / "state.json"
+
+
+def read_state(directory=None, max_age=45, now=time.time):
+    """The published gate verdict, or None when missing or stale.
+
+    A stale file means the supervisor stopped publishing, which is exactly when
+    the verdict must not be trusted: fail closed by returning None.
+    """
+    try:
+        data = json.loads(state_path(directory).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    try:
+        updated = float(data.get("updated_at", 0))
+    except (TypeError, ValueError):
+        return None
+    if now() - updated > max_age:
+        return None
+    return data
+
+
+def run_watch(gate, interval=None, iterations=None, sleep=time.sleep):
+    """Keep the gate verified and republish its verdict.
+
+    One iteration: make sure mihomo is up, verify, publish. Any failure is
+    published as BLOCKED rather than raised, so the supervisor never dies with a
+    stale READY file behind it.
+    """
+    interval = interval or gate.options["verify_interval"]
+    count = 0
+    results = []
+    while iterations is None or count < iterations:
+        count += 1
+        try:
+            if not gate.running():
+                gate.start()
+            status = gate.verify()
+        except Exception as exc:
+            gate.state = "BLOCKED"
+            gate.reason = f"守护失败：{exc}"
+            status = gate.status()
+        results.append(gate.publish(status))
+        if iterations is not None and count >= iterations:
+            break
+        sleep(interval)
+    return results

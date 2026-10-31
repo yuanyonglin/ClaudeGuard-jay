@@ -48,3 +48,29 @@ class CLIProxyTests(unittest.TestCase):
         for value in ('', 'socks5://localhost:7897', 'https://localhost:7897', 'http://localhost', 'http://localhost:99999', 'http://user:secret@localhost:7897', 'http://localhost:7897/path'):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 cli_environment({'cli_http_proxy_enabled': True, 'http_proxy': value}, {})
+
+
+class GateProxyTests(unittest.TestCase):
+    def test_gate_mode_points_claude_at_the_gate(self):
+        data = {'gate_enabled': True, 'gate_proxy_port': 17899}
+        env = cli_environment(data, {'NO_PROXY': '*', 'HTTPS_PROXY': 'http://wrong:1'})
+        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy'):
+            self.assertEqual(env[key], 'http://127.0.0.1:17899')
+        self.assertEqual(env['NO_PROXY'], '')
+        self.assertEqual(env['no_proxy'], '')
+
+    def test_gate_mode_overrides_a_manually_configured_proxy(self):
+        """A user proxy here would silently bypass the pinned exit."""
+        data = {'gate_enabled': True, 'gate_proxy_port': 17899,
+                'cli_http_proxy_enabled': True, 'http_proxy': 'http://127.0.0.1:7897'}
+        self.assertEqual(cli_environment(data, {})['HTTPS_PROXY'], 'http://127.0.0.1:17899')
+
+    def test_gate_disabled_keeps_the_manual_proxy_behaviour(self):
+        data = {'gate_enabled': False, 'cli_http_proxy_enabled': True,
+                'http_proxy': 'http://127.0.0.1:7897'}
+        self.assertEqual(cli_environment(data, {})['HTTPS_PROXY'], 'http://127.0.0.1:7897')
+
+    def test_invalid_gate_port_is_rejected(self):
+        for value in ('17899', 0, 70000, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                cli_environment({'gate_enabled': True, 'gate_proxy_port': value}, {})

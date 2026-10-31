@@ -65,6 +65,7 @@ ClaudeGuard：按出口 IP 白名单保护 Claude
   gate start           启动门卫并立即验证出口
   gate stop            停止门卫
   gate verify          重新验证出口，通过才放行
+  gate watch           持续复检并发布状态（LaunchAgent 用；--once 只跑一次）
   gate nodes           列出订阅里的节点（默认读 v2rayN 的订阅）
                        可选：--v2rayn [库路径] | --url <订阅地址> | --file <路径> | --proxy <host:port>
   gate import <序号>   把其中一个节点固定下来，写入 node.json
@@ -403,7 +404,8 @@ def pf_command(config, args):
         return
 
     if action == "apply":
-        gate = gate_lib.Gate(node_path=config.gate_node_path,
+        gate = gate_lib.Gate(directory=config.gate_dir,
+                             node_path=config.gate_node_path,
                              options=config.gate_settings(),
                              mihomo=config.gate_mihomo_path or None)
         status = gate.status()
@@ -422,7 +424,8 @@ def pf_command(config, args):
         return
 
     if action == "verify":
-        gate = gate_lib.Gate(node_path=config.gate_node_path,
+        gate = gate_lib.Gate(directory=config.gate_dir,
+                             node_path=config.gate_node_path,
                              options=config.gate_settings(),
                              mihomo=config.gate_mihomo_path or None)
         observed, errors = gate.probe()
@@ -515,7 +518,8 @@ def gate_command(config, args):
     from src import gate as gate_lib
 
     action = (args[0] if args else "status").lower()
-    gate = gate_lib.Gate(node_path=config.gate_node_path,
+    gate = gate_lib.Gate(directory=config.gate_dir,
+                         node_path=config.gate_node_path,
                          options=config.gate_settings(),
                          mihomo=config.gate_mihomo_path or None)
 
@@ -561,6 +565,24 @@ def gate_command(config, args):
         print(f"   写入：{config.gate_node_path}")
         print("   下一步： claudeguard set-gate-expected-ip <该节点的出口 IP>")
         return
+
+    if action == "watch":
+        import time
+        from src.gate import run_watch
+        if "--once" in args:
+            result = run_watch(gate, iterations=1)[0]
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            sys.exit(0 if result["state"] == "READY" else 1)
+        interval = gate.options["verify_interval"]
+        print(f"门卫守护已启动，每 {interval} 秒复检一次。Ctrl-C 退出。")
+        try:
+            while True:
+                item = run_watch(gate, iterations=1)[0]
+                print(f"[{time.strftime('%H:%M:%S')}] {item['state']}  {item.get('reason', '')}")
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            print("\n已停止守护。")
+            return
 
     if action == "status":
         status = gate.status()
