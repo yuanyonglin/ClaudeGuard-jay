@@ -925,6 +925,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         recheck.target = self
         menu.addItem(recheck)
 
+        let procMenu = NSMenu()
+        let freezeItem = NSMenuItem(title: "❄️ 冻结 Claude（保留会话）", action: #selector(onFreezeClaude), keyEquivalent: "")
+        freezeItem.target = self
+        procMenu.addItem(freezeItem)
+        let resumeItem = NSMenuItem(title: "▶️ 恢复 Claude", action: #selector(onResumeClaude), keyEquivalent: "")
+        resumeItem.target = self
+        procMenu.addItem(resumeItem)
+        procMenu.addItem(.separator())
+        let killItem = NSMenuItem(title: "⛔️ 结束全部 Claude", action: #selector(onKillClaude), keyEquivalent: "")
+        killItem.target = self
+        procMenu.addItem(killItem)
+
+        let procRoot = NSMenuItem(title: "🧊 Claude 进程", action: nil, keyEquivalent: "")
+        procRoot.submenu = procMenu
+        menu.addItem(procRoot)
+
         menu.addItem(.separator())
 
         let prot = NSMenuItem(title: protectionEnabled ? "✓ 防护已开启" : "防护已关闭", action: #selector(onToggleProtection), keyEquivalent: "")
@@ -1180,6 +1196,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func onOpenDashboard() { dashboard.show() }
 
+    @objc func onFreezeClaude() {
+        let count = ClaudeControl.freeze()
+        logEvent("claude_frozen", fields: ["count": count])
+        rebuildMenu()
+    }
+
+    @objc func onResumeClaude() {
+        let count = ClaudeControl.resume()
+        logEvent("claude_resumed", fields: ["count": count])
+        rebuildMenu()
+    }
+
+    @objc func onKillClaude() {
+        let count = ClaudeControl.terminateAll()
+        logEvent("claude_terminated", fields: ["count": count])
+        rebuildMenu()
+    }
+
     @objc func onRecheck() { recheckAsync() }
 
     @objc func onSelectIPCheckMode(_ sender: NSMenuItem) {
@@ -1273,29 +1307,157 @@ app.delegate = delegate
 app.run()
 
 
+
+// MARK: - Claude process control
+
+/// Freeze / resume / terminate Claude without pretending to be a debugger.
+///
+/// SIGSTOP is what "freeze" means here: the process keeps its memory and its
+/// sockets but stops running, so a session survives and can be resumed. That is
+/// strictly safer than killing, which loses whatever was in flight.
+enum ClaudeControl {
+    /// Matches Claude Desktop and the `claude` CLI, never ClaudeGuard itself.
+    private static let pattern = "Claude\\.app/Contents/MacOS/Claude|/bin/claude( |$)"
+
+    static func pids() -> [Int32] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-f", pattern]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do { try process.run() } catch { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(data: data, encoding: .utf8)?
+            .split(separator: "\n")
+            .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) } ?? []
+    }
+
+    @discardableResult
+    private static func signal(_ sig: String, _ pids: [Int32]) -> Bool {
+        guard !pids.isEmpty else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/kill")
+        process.arguments = ["-" + sig] + pids.map(String.init)
+        process.standardError = Pipe()
+        do { try process.run() } catch { return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
+    @discardableResult
+    static func freeze() -> Int { let list = pids(); signal("STOP", list); return list.count }
+    @discardableResult
+    static func resume() -> Int { let list = pids(); signal("CONT", list); return list.count }
+
+    /// Ask politely, then insist. Returns how many were targeted.
+    @discardableResult
+    static func terminateAll() -> Int {
+        let list = pids()
+        guard !list.isEmpty else { return 0 }
+        signal("TERM", list)
+        let deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline {
+            let alive = list.filter { kill($0, 0) == 0 }
+            if alive.isEmpty { break }
+            usleep(150_000)
+        }
+        let survivors = list.filter { kill($0, 0) == 0 }
+        signal("KILL", survivors)
+        return list.count
+    }
+}
+
+
+
 // MARK: - Dashboard window
 
-/// The menu bar is fine for a glance; this window is for the gate, which has
-/// more state than a menu can carry: pinned node, expected vs observed exit,
-/// and the actions that change them.
+/// The menu bar is fine for a glance; this window carries the gate, which has
+/// more state than a menu can show. It reads the same published files the
+/// daemon uses and drives everything through the CLI, so the two cannot disagree.
 final class DashboardWindow: NSObject {
     private var window: NSWindow?
     private var timer: Timer?
-    private let statusLabel = NSTextField(labelWithString: "")
-    private let gateLabel = NSTextField(labelWithString: "")
-    private let nodeLabel = NSTextField(labelWithString: "")
-    private let ipLabel = NSTextField(labelWithString: "")
-    private let messageLabel = NSTextField(labelWithString: "")
-    private let eventsLabel = NSTextField(labelWithString: "")
 
-    private func expand(_ path: String) -> String {
-        NSString(string: path).expandingTildeInPath
-    }
+    private let dot = NSView()
+    private let headline = NSTextField(labelWithString: "")
+    private let subtitle = NSTextField(labelWithString: "")
+    private let gateStateValue = NSTextField(labelWithString: "")
+    private let gateNodeValue = NSTextField(labelWithString: "")
+    private let gateExpectedValue = NSTextField(labelWithString: "")
+    private let gateObservedValue = NSTextField(labelWithString: "")
+    private let procValue = NSTextField(labelWithString: "")
+    private let messageLabel = NSTextField(labelWithString: "")
+    private let eventsText = NSTextView()
+
+    private func expand(_ path: String) -> String { NSString(string: path).expandingTildeInPath }
     private var configPath: String { expand("~/.config/claudeguard/config.json") }
     private var gateStatePath: String { expand("~/.config/claudeguard/gate/state.json") }
     private var gateNodePath: String { expand("~/.config/claudeguard/gate/node.json") }
     private var eventPath: String { expand("~/.config/claudeguard/events.jsonl") }
     private var cliPath: String { expand("~/.local/share/ClaudeGuard/bin/claudeguard") }
+
+    // MARK: layout helpers
+
+    private func caption(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        return label
+    }
+
+    private func row(_ key: String, _ value: NSTextField) -> NSStackView {
+        let name = NSTextField(labelWithString: key)
+        name.font = .systemFont(ofSize: 12)
+        name.textColor = .secondaryLabelColor
+        name.alignment = .left
+        name.widthAnchor.constraint(equalToConstant: 66).isActive = true
+        value.font = .systemFont(ofSize: 12)
+        value.lineBreakMode = .byTruncatingTail
+        let stack = NSStackView(views: [name, value])
+        stack.orientation = .horizontal
+        stack.spacing = 10
+        stack.alignment = .firstBaseline
+        return stack
+    }
+
+    private func button(_ title: String, _ action: Selector, primary: Bool = false) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .rounded
+        button.controlSize = .large
+        button.font = .systemFont(ofSize: 12, weight: primary ? .semibold : .regular)
+        return button
+    }
+
+    private func card(_ title: String, _ rows: [NSView]) -> NSBox {
+        let stack = NSStackView(views: [caption(title)] + rows)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 9
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let box = NSBox()
+        box.boxType = .custom
+        box.titlePosition = .noTitle
+        box.cornerRadius = 10
+        box.fillColor = .controlBackgroundColor
+        box.borderColor = .separatorColor
+        box.borderWidth = 1
+        box.contentViewMargins = NSSize(width: 14, height: 12)
+        if let content = box.contentView {
+            content.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.topAnchor.constraint(equalTo: content.topAnchor),
+                stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+                stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            ])
+        }
+        return box
+    }
+
+    // MARK: window
 
     func show() {
         if window == nil { build() }
@@ -1308,103 +1470,183 @@ final class DashboardWindow: NSObject {
         }
     }
 
-    private func readJSON(_ path: String) -> [String: Any]? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
-        return obj
+    private func build() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 620),
+                              styleMask: [.titled, .closable, .miniaturizable],
+                              backing: .buffered, defer: false)
+        window.title = "ClaudeGuard"
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.titlebarAppearsTransparent = true
+
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 6
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.widthAnchor.constraint(equalToConstant: 12).isActive = true
+        dot.heightAnchor.constraint(equalToConstant: 12).isActive = true
+
+        headline.font = .systemFont(ofSize: 20, weight: .bold)
+        subtitle.font = .systemFont(ofSize: 12)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.lineBreakMode = .byTruncatingTail
+
+        let titleRow = NSStackView(views: [dot, headline])
+        titleRow.orientation = .horizontal
+        titleRow.spacing = 9
+        titleRow.alignment = .centerY
+
+        let header = NSStackView(views: [titleRow, subtitle])
+        header.orientation = .vertical
+        header.alignment = .leading
+        header.spacing = 3
+
+        let gateButtons = NSStackView(views: [
+            button("复检", #selector(onVerify), primary: true),
+            button("启动门卫", #selector(onStart)),
+            button("停止门卫", #selector(onStop)),
+        ])
+        gateButtons.orientation = .horizontal
+        gateButtons.spacing = 8
+
+        let gateCard = card("门卫 · 固定出口", [
+            row("状态", gateStateValue),
+            row("节点", gateNodeValue),
+            row("固定出口", gateExpectedValue),
+            row("实测出口", gateObservedValue),
+            gateButtons,
+        ])
+
+        let procButtons = NSStackView(views: [
+            button("冻结", #selector(onFreeze)),
+            button("恢复", #selector(onResume)),
+            button("结束全部", #selector(onKill)),
+        ])
+        procButtons.orientation = .horizontal
+        procButtons.spacing = 8
+
+        let procCard = card("Claude 进程", [procValue, procButtons])
+
+        eventsText.isEditable = false
+        eventsText.isSelectable = true
+        eventsText.drawsBackground = false
+        eventsText.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        eventsText.textColor = .secondaryLabelColor
+        eventsText.textContainerInset = NSSize(width: 0, height: 2)
+
+        let scroll = NSScrollView()
+        scroll.documentView = eventsText
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.heightAnchor.constraint(equalToConstant: 118).isActive = true
+        scroll.widthAnchor.constraint(equalToConstant: 400).isActive = true
+
+        let eventsCard = card("最近事件", [scroll])
+
+        messageLabel.font = .systemFont(ofSize: 11)
+        messageLabel.textColor = .tertiaryLabelColor
+        messageLabel.lineBreakMode = .byTruncatingTail
+
+        let root = NSStackView(views: [header, gateCard, procCard, eventsCard, messageLabel])
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 14
+        root.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+        root.translatesAutoresizingMaskIntoConstraints = false
+
+        let background = NSVisualEffectView()
+        background.material = .underWindowBackground
+        background.blendingMode = .behindWindow
+        background.state = .active
+        background.addSubview(root)
+        NSLayoutConstraint.activate([
+            root.topAnchor.constraint(equalTo: background.topAnchor),
+            root.leadingAnchor.constraint(equalTo: background.leadingAnchor),
+            root.trailingAnchor.constraint(equalTo: background.trailingAnchor),
+            root.bottomAnchor.constraint(equalTo: background.bottomAnchor),
+        ])
+        window.contentView = background
+        self.window = window
     }
 
-    private func build() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
-                         styleMask: [.titled, .closable, .miniaturizable],
-                         backing: .buffered, defer: false)
-        w.title = "ClaudeGuard"
-        w.center()
-        w.isReleasedWhenClosed = false
+    // MARK: refresh
 
-        statusLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
-        for label in [gateLabel, nodeLabel, ipLabel, messageLabel, eventsLabel] {
-            label.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-            label.lineBreakMode = .byWordWrapping
-            label.maximumNumberOfLines = 0
-        }
-        eventsLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-
-        let verify = NSButton(title: "门卫复检", target: self, action: #selector(onVerify))
-        let start = NSButton(title: "启动门卫", target: self, action: #selector(onStart))
-        let stop = NSButton(title: "停止门卫", target: self, action: #selector(onStop))
-        let row = NSStackView(views: [verify, start, stop])
-        row.orientation = .horizontal
-        row.spacing = 8
-
-        let stack = NSStackView(views: [statusLabel, gateLabel, nodeLabel, ipLabel, row, messageLabel, eventsLabel])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let content = NSView()
-        content.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: content.topAnchor),
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-        ])
-        w.contentView = content
-        window = w
+    private func readJSON(_ path: String) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        return object
     }
 
     func refresh() {
         guard window != nil else { return }
-        let cfg = readJSON(configPath) ?? [:]
+        let config = readJSON(configPath) ?? [:]
         let gate = readJSON(gateStatePath) ?? [:]
         let node = readJSON(gateNodePath) ?? [:]
 
-        let gateOn = (cfg["gate_enabled"] as? Bool) ?? false
+        let gateOn = (config["gate_enabled"] as? Bool) ?? false
         let rawState = (gate["state"] as? String) ?? "STOPPED"
         let updated = (gate["updated_at"] as? Double) ?? 0
         let fresh = Date().timeIntervalSince1970 - updated <= 45
-        let shownState = fresh ? rawState : "STOPPED（状态过期）"
+        let state = fresh ? rawState : "STOPPED"
 
-        statusLabel.stringValue = gateOn ? "判定来源：门卫（固定出口）" : "判定来源：IP 白名单"
+        let dotColor: NSColor
+        let title: String
+        switch state {
+        case "READY":  dotColor = .systemGreen;  title = gateOn ? "固定出口已验证" : "出口已通过检查"
+        case "BLOCKED": dotColor = .systemRed;   title = "已拦截"
+        case "STARTING": dotColor = .systemYellow; title = "正在验证"
+        default:       dotColor = .systemGray;   title = "门卫未运行"
+        }
+        dot.layer?.backgroundColor = dotColor.cgColor
+        headline.stringValue = title
 
         let reason = (gate["reason"] as? String) ?? ""
-        gateLabel.stringValue = "门卫状态：\(shownState)" + (reason.isEmpty ? "" : "\n原因：\(reason)")
+        let expected = (gate["expected_ip"] as? String) ?? ""
+        let observed = (gate["observed_ip"] as? String) ?? ""
+        if !gateOn {
+            subtitle.stringValue = "判定来源：IP 白名单"
+        } else if !fresh {
+            subtitle.stringValue = "门卫状态未发布或已过期"
+        } else {
+            subtitle.stringValue = reason.isEmpty ? "判定来源：门卫" : reason
+        }
 
+        gateStateValue.stringValue = fresh ? rawState : "\(rawState)（过期）"
         let name = (node["name"] as? String) ?? "未固定节点"
         let server = (node["server"] as? String) ?? "-"
         let port = (node["port"] as? Int) ?? 0
-        nodeLabel.stringValue = "固定节点：\(name)  \(server):\(port)"
+        gateNodeValue.stringValue = "\(name)  \(server):\(port)"
+        gateExpectedValue.stringValue = expected.isEmpty ? "未设置" : expected
+        gateObservedValue.stringValue = observed.isEmpty ? "未验证" : observed
 
-        let expected = (gate["expected_ip"] as? String) ?? ""
-        let observed = (gate["observed_ip"] as? String) ?? ""
-        ipLabel.stringValue = "固定出口：\(expected.isEmpty ? "未设置" : expected)\n实测出口：\(observed.isEmpty ? "未验证" : observed)"
+        let count = ClaudeControl.pids().count
+        procValue.stringValue = count == 0 ? "未检测到运行中的 Claude" : "检测到 \(count) 个 Claude 进程"
 
-        eventsLabel.stringValue = "最近事件\n" + recentEvents()
+        eventsText.string = recentEvents()
     }
 
     private func recentEvents() -> String {
         guard let text = try? String(contentsOfFile: eventPath, encoding: .utf8) else { return "（无）" }
-        let lines = text.split(separator: "\n").suffix(5)
-        var out: [String] = []
-        for line in lines {
+        var lines: [String] = []
+        for line in text.split(separator: "\n").suffix(6) {
             guard let data = line.data(using: .utf8),
-                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
-            let stamp = ((obj["time"] as? String) ?? "").dropFirst(11).prefix(8)
-            let event = (obj["event"] as? String) ?? ""
-            let state = (obj["state"] as? String) ?? ""
-            out.append("  \(stamp)  \(event) \(state)")
+                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+            let stamp = String(((object["time"] as? String) ?? "").dropFirst(11).prefix(8))
+            let event = (object["event"] as? String) ?? ""
+            let state = (object["state"] as? String) ?? ""
+            lines.append("\(stamp)  \(event) \(state)")
         }
-        return out.isEmpty ? "（无）" : out.joined(separator: "\n")
+        return lines.isEmpty ? "（无）" : lines.joined(separator: "\n")
     }
 
-    private func run(_ args: [String]) {
+    // MARK: actions
+
+    private func run(_ arguments: [String]) {
         messageLabel.stringValue = "执行中…"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliPath)
-        process.arguments = args
+        process.arguments = arguments
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
@@ -1429,4 +1671,22 @@ final class DashboardWindow: NSObject {
     @objc private func onVerify() { run(["gate", "verify"]) }
     @objc private func onStart() { run(["gate", "start"]) }
     @objc private func onStop() { run(["gate", "stop"]) }
+
+    @objc private func onFreeze() {
+        let count = ClaudeControl.freeze()
+        messageLabel.stringValue = count == 0 ? "没有可冻结的 Claude 进程" : "已冻结 \(count) 个进程"
+        refresh()
+    }
+
+    @objc private func onResume() {
+        let count = ClaudeControl.resume()
+        messageLabel.stringValue = count == 0 ? "没有可恢复的 Claude 进程" : "已恢复 \(count) 个进程"
+        refresh()
+    }
+
+    @objc private func onKill() {
+        let count = ClaudeControl.terminateAll()
+        messageLabel.stringValue = count == 0 ? "没有需要结束的 Claude 进程" : "已结束 \(count) 个进程"
+        refresh()
+    }
 }
