@@ -46,6 +46,15 @@ class SettingsTests(unittest.TestCase):
     def test_expected_ip_is_trimmed(self):
         self.assertEqual(gate.settings({"expected_ip": "  198.51.100.7 "})["expected_ip"], "198.51.100.7")
 
+    def test_main_proxy_normalisation(self):
+        self.assertEqual(gate.parse_main_proxy(""), "")
+        self.assertEqual(gate.parse_main_proxy("direct"), "")
+        self.assertEqual(gate.parse_main_proxy("http://127.0.0.1:7897"), "127.0.0.1:7897")
+        self.assertEqual(gate.parse_main_proxy(" 127.0.0.1:7897 "), "127.0.0.1:7897")
+        for value in ("127.0.0.1", "http://user:pass@127.0.0.1:7897", "127.0.0.1:abc", 7897):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                gate.parse_main_proxy(value)
+
 
 class NodeTests(unittest.TestCase):
     def test_valid_vless_node(self):
@@ -92,7 +101,30 @@ class RenderTests(unittest.TestCase):
         group = self.config["proxy-groups"][0]
         self.assertEqual(group["name"], gate.GATE_GROUP)
         self.assertEqual(group["proxies"], [gate.PINNED, gate.REJECT])
-        self.assertEqual(self.config["rules"], [f"MATCH,{gate.GATE_GROUP}"])
+
+    def test_claude_proxy_port_always_uses_the_gate(self):
+        self.assertEqual(self.config["rules"][0], "IN-PORT,27899,GATE")
+
+    def test_anthropic_domains_use_the_gate_and_the_rest_use_main(self):
+        rules = self.config["rules"]
+        for domain in gate.CLAUDE_DOMAINS:
+            self.assertIn(f"DOMAIN-SUFFIX,{domain},GATE", rules)
+        self.assertEqual(rules[-1], "MATCH,MAIN")
+
+    def test_main_defaults_to_direct(self):
+        main = self.config["proxy-groups"][1]
+        self.assertEqual(main["name"], gate.MAIN_GROUP)
+        self.assertEqual(main["proxies"], ["DIRECT"])
+        self.assertEqual(len(self.config["proxies"]), 1)
+
+    def test_main_proxy_is_chained_as_an_http_upstream(self):
+        config = gate.render_config(gate.validate_node(NODE),
+                                    gate.settings({**OPTIONS, "main_proxy": "http://127.0.0.1:7897"}), "tok")
+        upstream = config["proxies"][1]
+        self.assertEqual(upstream["type"], "http")
+        self.assertEqual(upstream["server"], "127.0.0.1")
+        self.assertEqual(upstream["port"], 7897)
+        self.assertEqual(config["proxy-groups"][1]["proxies"], [gate.MAIN_PROXY, "DIRECT"])
 
     def test_probe_listener_is_wired_to_the_pinned_node(self):
         listener = self.config["listeners"][0]

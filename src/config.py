@@ -54,7 +54,11 @@ DEFAULT_CONFIG = {
     "gate_redir_port": 17897,
     "gate_controller_port": 19099,
     "gate_verify_interval": 30,
-    "gate_verify_timeout": 8
+    "gate_verify_timeout": 8,
+    # Node sources. Empty subscription URL falls back to v2rayN's stored one.
+    "gate_subscription_url": "",
+    "gate_v2rayn_db": "",
+    "gate_main_proxy": ""
 }
 
 class ConfigManager:
@@ -204,3 +208,11 @@ class ConfigManager:
             if value is not None and value != "":
                 data[key] = value
         return data
+
+    @property
+    def gate_subscription_url(self):
+        return (self.config.get("gate_subscription_url") or "").strip()
+
+    @property
+    def gate_v2rayn_db(self):
+        return (self.config.get("gate_v2rayn_db") or "").strip()

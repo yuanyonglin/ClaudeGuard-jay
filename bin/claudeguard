@@ -65,7 +65,10 @@ ClaudeGuard：按出口 IP 白名单保护 Claude
   gate start           启动门卫并立即验证出口
   gate stop            停止门卫
   gate verify          重新验证出口，通过才放行
-  set-gate-node <path> 指定固定节点文件（JSON）
+  gate nodes           列出订阅里的节点（默认读 v2rayN 的订阅）
+                       可选：--v2rayn [库路径] | --url <订阅地址> | --file <路径> | --proxy <host:port>
+  gate import <序号>   把其中一个节点固定下来，写入 node.json
+  set-gate-node <path> 直接指定固定节点文件（JSON）
   set-gate-expected-ip <IP>  指定该节点的固定出口 IPv4
   enable-gate          启用以门卫为判定依据的保护
   disable-gate         关闭门卫判定，回到纯 IP 白名单
@@ -336,6 +339,52 @@ def main():
         print_help()
         sys.exit(1)
 
+def gate_source(config, args):
+    """Resolve node candidates from --url, --file, --v2rayn, or the saved defaults.
+
+    Returns (nodes, skipped, label). The subscription is the source of truth for
+    protocol details, so a client is only ever asked for its URL.
+    """
+    from src import gate_nodes
+
+    url = path = db = proxy = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--url" and index + 1 < len(args):
+            url, index = args[index + 1], index + 2
+        elif arg == "--file" and index + 1 < len(args):
+            path, index = args[index + 1], index + 2
+        elif arg == "--v2rayn":
+            if index + 1 < len(args) and not args[index + 1].startswith("--"):
+                db, index = args[index + 1], index + 2
+            else:
+                db, index = (config.gate_v2rayn_db or None), index + 1
+        elif arg == "--proxy" and index + 1 < len(args):
+            proxy, index = args[index + 1], index + 2
+        else:
+            index += 1
+
+    try:
+        if url:
+            nodes, skipped = gate_nodes.nodes_from_url(url, proxy=proxy)
+            return nodes, skipped, f"订阅地址 {url.split('?')[0][:48]}"
+        if path:
+            nodes, skipped = gate_nodes.nodes_from_file(path)
+            return nodes, skipped, f"文件 {path}"
+        if db:
+            nodes, skipped = gate_nodes.nodes_from_v2rayn(db, proxy=proxy)
+            return nodes, skipped, f"v2rayN 订阅（{db}）"
+        if config.gate_subscription_url:
+            nodes, skipped = gate_nodes.nodes_from_url(config.gate_subscription_url, proxy=proxy)
+            return nodes, skipped, "已配置的订阅地址"
+        nodes, skipped = gate_nodes.nodes_from_v2rayn(config.gate_v2rayn_db or None, proxy=proxy)
+        return nodes, skipped, "v2rayN 订阅"
+    except Exception as exc:
+        print(f"❌ 读取节点失败：{exc}")
+        sys.exit(1)
+
+
 def gate_command(config, args):
     """Manage the pinned-exit gate. P1 scope: process, config and verdict only —
     no pf rules yet, so a running gate protects traffic that goes through it but
@@ -346,6 +395,49 @@ def gate_command(config, args):
     gate = gate_lib.Gate(node_path=config.gate_node_path,
                          options=config.gate_settings(),
                          mihomo=config.gate_mihomo_path or None)
+
+    if action == "nodes":
+        nodes, skipped, source = gate_source(config, args[1:])
+        print(f"=== 节点来源：{source} ===")
+        if not nodes:
+            print("没有解析到可用节点。")
+            for line, reason in skipped:
+                print(f"  跳过：{reason}（{line}）")
+            sys.exit(1)
+        for index, node in enumerate(nodes, 1):
+            detail = node["type"]
+            if node.get("reality-opts"):
+                detail += " reality"
+            elif node.get("ws-opts"):
+                detail += " ws"
+            print(f"  [{index}] {detail:14} {node['server']}:{node['port']}  {node['name']}")
+        if skipped:
+            print(f"\n跳过 {len(skipped)} 条：")
+            for line, reason in skipped:
+                print(f"  - {reason}（{line}）")
+        print("\n用 claudeguard gate import <序号> 固定其中一个节点。")
+        return
+
+    if action == "import":
+        rest = args[1:]
+        if not rest or not rest[0].isdigit():
+            print("用法： claudeguard gate import <序号> [--v2rayn | --url <地址> | --file <路径>]")
+            sys.exit(1)
+        index = int(rest[0])
+        nodes, skipped, source = gate_source(config, rest[1:])
+        if not 1 <= index <= len(nodes):
+            print(f"序号超出范围：来源 {source} 共 {len(nodes)} 个节点。")
+            sys.exit(1)
+        node = nodes[index - 1]
+        os.makedirs(os.path.dirname(config.gate_node_path), exist_ok=True)
+        fd = os.open(config.gate_node_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(node, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        print(f"✅ 已固定节点 [{index}] {node['name']}（{node['server']}:{node['port']}）")
+        print(f"   写入：{config.gate_node_path}")
+        print("   下一步： claudeguard set-gate-expected-ip <该节点的出口 IP>")
+        return
 
     if action == "status":
         status = gate.status()

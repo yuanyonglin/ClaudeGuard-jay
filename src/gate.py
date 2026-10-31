@@ -38,7 +38,20 @@ DEFAULTS = {
     "expected_ip": "",
     "verify_interval": 30,
     "verify_timeout": 8,
+    # Upstream for traffic that is not Claude's. Empty means DIRECT; a value like
+    # http://127.0.0.1:7897 keeps the user's existing Clash in the path.
+    "main_proxy": "",
 }
+
+# Domains that must always leave through the pinned node, even when they arrive
+# on the transparent port rather than Claude's explicit proxy port.
+CLAUDE_DOMAINS = (
+    "claude.ai",
+    "claude.com",
+    "claudeusercontent.com",
+    "anthropic.com",
+    "anthropic.ai",
+)
 
 PROBE_URLS = (
     ("http", "https://api.ipify.org/"),
@@ -48,6 +61,8 @@ PROBE_URLS = (
 PINNED = "PINNED"
 GATE_GROUP = "GATE"
 REJECT = "REJECT"
+MAIN_GROUP = "MAIN"
+MAIN_PROXY = "MAIN-PROXY"
 
 # Where a mihomo binary may live, in preference order. The Clash Verge copy is a
 # development convenience, never the production choice: an app upgrade replaces it.
@@ -91,7 +106,30 @@ def settings(data):
     if not isinstance(expected, str):
         raise ValueError("expected_ip 必须是字符串")
     result["expected_ip"] = expected.strip()
+
+    result["main_proxy"] = parse_main_proxy(result.get("main_proxy"))
     return result
+
+
+def parse_main_proxy(value):
+    """Normalise the non-Claude upstream to host:port, or '' for DIRECT."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("main_proxy 必须是字符串，例如 http://127.0.0.1:7897")
+    text = value.strip()
+    if not text or text.lower() in ("direct", "none", "off"):
+        return ""
+    for prefix in ("http://", "https://"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):]
+            break
+    if "/" in text or "@" in text:
+        raise ValueError("main_proxy 只能是 host:port，例如 127.0.0.1:7897")
+    host, _, port = text.rpartition(":")
+    if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise ValueError("main_proxy 必须包含端口，例如 127.0.0.1:7897")
+    return f"{host}:{int(port)}"
 
 
 # --- pinned node -----------------------------------------------------------
@@ -123,9 +161,19 @@ def validate_node(node):
         result["password"] = node["password"]
         return result
 
-    if not isinstance(node.get("uuid"), str) or not node["uuid"]:
-        raise ValueError(f"{kind} 节点缺少 uuid")
-    result["uuid"] = node["uuid"]
+    if kind == "trojan":
+        if not isinstance(node.get("password"), str) or not node["password"]:
+            raise ValueError("trojan 节点缺少 password")
+        result["password"] = node["password"]
+    else:
+        if not isinstance(node.get("uuid"), str) or not node["uuid"]:
+            raise ValueError(f"{kind} 节点缺少 uuid")
+        result["uuid"] = node["uuid"]
+        if kind == "vmess" and "alterId" in node:
+            alter = node["alterId"]
+            if isinstance(alter, bool) or not isinstance(alter, int) or not 0 <= alter <= 65535:
+                raise ValueError("vmess 节点 alterId 必须是 0～65535 的整数")
+            result["alterId"] = alter
 
     network = node.get("network") or "tcp"
     if network not in ("tcp", "ws", "grpc", "h2"):
@@ -159,6 +207,15 @@ def validate_node(node):
         if not isinstance(ws, dict):
             raise ValueError("ws-opts 必须是对象")
         result["ws-opts"] = {k: v for k, v in ws.items() if isinstance(k, str)}
+
+    grpc = node.get("grpc-opts")
+    if grpc is not None:
+        if not isinstance(grpc, dict):
+            raise ValueError("grpc-opts 必须是对象")
+        service = grpc.get("grpc-service-name")
+        if not isinstance(service, str) or not service:
+            raise ValueError("grpc-opts 缺少 grpc-service-name")
+        result["grpc-opts"] = {"grpc-service-name": service}
 
     return result
 
@@ -234,10 +291,16 @@ def render_config(node, options, token):
         proxy["cipher"] = node["cipher"]
         proxy["password"] = node["password"]
     else:
-        proxy["uuid"] = node["uuid"]
+        if node["type"] == "trojan":
+            proxy["password"] = node["password"]
+        else:
+            proxy["uuid"] = node["uuid"]
+            if node["type"] == "vmess":
+                proxy["alterId"] = node.get("alterId", 0)
+                proxy["cipher"] = "auto"
+            else:
+                proxy["udp"] = True
         proxy["network"] = node["network"]
-        if node["type"] != "vmess":
-            proxy["udp"] = True
         if node.get("flow"):
             proxy["flow"] = node["flow"]
         if node.get("client-fingerprint"):
@@ -250,6 +313,30 @@ def render_config(node, options, token):
             proxy["reality-opts"] = dict(node["reality-opts"])
         if node.get("ws-opts"):
             proxy["ws-opts"] = dict(node["ws-opts"])
+        if node.get("grpc-opts"):
+            proxy["grpc-opts"] = dict(node["grpc-opts"])
+
+    proxies = [proxy]
+    groups = [{
+        "name": GATE_GROUP,
+        "type": "select",
+        "proxies": [PINNED, REJECT],
+    }]
+
+    main_proxy = options.get("main_proxy") or ""
+    if main_proxy:
+        host, _, port = main_proxy.rpartition(":")
+        proxies.append({"name": MAIN_PROXY, "type": "http", "server": host, "port": int(port)})
+        groups.append({"name": MAIN_GROUP, "type": "select", "proxies": [MAIN_PROXY, "DIRECT"]})
+    else:
+        groups.append({"name": MAIN_GROUP, "type": "select", "proxies": ["DIRECT"]})
+
+    # Claude's explicit proxy port always goes through the gate, whatever the
+    # destination. The transparent port routes only Anthropic domains through
+    # the gate; everything else keeps the user's normal upstream.
+    rules = [f"IN-PORT,{options['proxy_port']},{GATE_GROUP}"]
+    rules += [f"DOMAIN-SUFFIX,{domain},{GATE_GROUP}" for domain in CLAUDE_DOMAINS]
+    rules.append(f"MATCH,{MAIN_GROUP}")
 
     config = {
         "mixed-port": options["proxy_port"],
@@ -260,12 +347,8 @@ def render_config(node, options, token):
         "log-level": "warning",
         "external-controller": f"127.0.0.1:{options['controller_port']}",
         "secret": token,
-        "proxies": [proxy],
-        "proxy-groups": [{
-            "name": GATE_GROUP,
-            "type": "select",
-            "proxies": [PINNED, REJECT],
-        }],
+        "proxies": proxies,
+        "proxy-groups": groups,
         # The probe listener is bound to the pinned node directly, so verifying
         # never depends on the state of the group Claude is using.
         "listeners": [{
@@ -275,7 +358,7 @@ def render_config(node, options, token):
             "listen": "127.0.0.1",
             "proxy": PINNED,
         }],
-        "rules": [f"MATCH,{GATE_GROUP}"],
+        "rules": rules,
     }
     if options.get("interface_name"):
         config["interface-name"] = options["interface_name"]
