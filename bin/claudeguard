@@ -72,6 +72,14 @@ ClaudeGuard：按出口 IP 白名单保护 Claude
   set-gate-expected-ip <IP>  指定该节点的固定出口 IPv4
   enable-gate          启用以门卫为判定依据的保护
   disable-gate         关闭门卫判定，回到纯 IP 白名单
+
+pf 重定向（需要 root）：
+  pf status            查看重定向是否已应用、是否已确认、内核里有没有规则
+  pf check             只生成并做 pf 语法检查，不加载
+  pf apply             应用重定向（门卫必须是 READY，否则拒绝）
+  pf verify            自检并确认；不通过会自动回滚
+  pf clear             撤销重定向，恢复 /etc/pf.conf
+  pf rollback          强制回滚到 /etc/pf.conf
 """
     print(help_text.strip())
 
@@ -279,6 +287,9 @@ def main():
         config.save_config()
         print(f"✅ 原始 Claude Code 路径已设为：{path}")
 
+    elif cmd == "pf":
+        pf_command(config, sys.argv[2:])
+
     elif cmd == "gate":
         gate_command(config, sys.argv[2:])
 
@@ -338,6 +349,118 @@ def main():
         print(f"无法识别命令：{cmd}")
         print_help()
         sys.exit(1)
+
+def pf_command(config, args):
+    """Apply or inspect the pf redirect. Refuses to run against a gate that is
+    not READY: redirecting every :443 on the machine into a blocked gate would
+    take the whole machine offline."""
+    import subprocess
+    from src import pf_guard
+    from src import gate as gate_lib
+
+    action = (args[0] if args else "status").lower()
+    node = {}
+    try:
+        node = gate_lib.load_node(config.gate_node_path)
+    except (ValueError, OSError):
+        pass
+
+    options = dict(config.gate_settings())
+    options["rollback_after"] = config.config.get("gate_rollback_after", 20)
+    guard = pf_guard.PfGuard(options, node)
+
+    if action == "check":
+        try:
+            text = pf_guard.render_anchor(guard.options, node)
+            pf_guard.validate_anchor(text)
+        except ValueError as exc:
+            print(f"❌ 锚点无效：{exc}")
+            sys.exit(1)
+        print(text)
+        import tempfile
+        fd, temp = tempfile.mkstemp(suffix=".pf")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            ok, detail = guard.syntax_check(temp)
+        finally:
+            os.unlink(temp)
+        print(("✅ pf 语法检查通过" if ok else f"❌ pf 语法检查失败：{detail}"))
+        sys.exit(0 if ok else 1)
+
+    if action == "status":
+        state = guard.state()
+        print("=== pf 重定向状态 ===")
+        print(f"已请求：{'是' if state['requested'] else '否'}")
+        print(f"已应用：{'是' if state['applied'] else '否'}")
+        print(f"已确认：{'是' if state['confirmed'] else '否'}")
+        if state["deadline"]:
+            print(f"回滚期限：{state['deadline']:.0f}")
+        if state["expired"]:
+            print("⚠️  已超期未确认，下次守护轮询会回滚")
+        loaded = pf_rules_loaded()
+        print(f"内核中的规则：{'已加载' if loaded else '未加载'}")
+        return
+
+    if action == "apply":
+        gate = gate_lib.Gate(node_path=config.gate_node_path,
+                             options=config.gate_settings(),
+                             mihomo=config.gate_mihomo_path or None)
+        status = gate.status()
+        if status["state"] != "READY":
+            print(f"❌ 门卫当前是 {status['state']}，不能应用 pf 重定向。")
+            print("   先把门卫验证到 READY： claudeguard gate start")
+            print("   否则全机 :443 会被导进一个关闭的门卫，等于断网。")
+            sys.exit(1)
+        try:
+            staged = guard.apply()
+        except (RuntimeError, OSError) as exc:
+            print(f"❌ 应用失败：{exc}")
+            sys.exit(1)
+        print(f"✅ 重定向已应用，回滚期限 {staged['deadline']:.0f}")
+        print("   现在运行 claudeguard pf verify 做自检；自检不通过会自动回滚。")
+        return
+
+    if action == "verify":
+        gate = gate_lib.Gate(node_path=config.gate_node_path,
+                             options=config.gate_settings(),
+                             mihomo=config.gate_mihomo_path or None)
+        observed, errors = gate.probe()
+        expected = gate.options["expected_ip"]
+        ip = next((v for v in observed.values() if v), "")
+        ok, reason = guard.self_check(lambda: ip, pf_rules_loaded, expected)
+        if ok:
+            guard.confirm()
+            print(f"✅ {reason}")
+            return
+        print(f"❌ 自检失败：{reason}")
+        guard.rollback()
+        print("   已回滚，机器网络恢复正常。")
+        sys.exit(1)
+
+    if action in ("clear", "rollback"):
+        try:
+            (guard.clear if action == "clear" else guard.rollback)()
+        except (RuntimeError, OSError) as exc:
+            print(f"❌ {action} 失败：{exc}")
+            sys.exit(1)
+        print(f"✅ 已{'撤销' if action == 'clear' else '回滚'}，pf 恢复为 /etc/pf.conf")
+        return
+
+    print("用法： claudeguard pf <status|check|apply|verify|clear|rollback>")
+    sys.exit(1)
+
+
+def pf_rules_loaded():
+    """True when pf reports rules under our anchor."""
+    import subprocess
+    try:
+        proc = subprocess.run(["/sbin/pfctl", "-a", "com.claudeguard.gate", "-s", "rules"],
+                              capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and "rdr" in proc.stdout
+
 
 def gate_source(config, args):
     """Resolve node candidates from --url, --file, --v2rayn, or the saved defaults.

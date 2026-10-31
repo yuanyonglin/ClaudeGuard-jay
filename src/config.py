@@ -55,6 +55,8 @@ DEFAULT_CONFIG = {
     "gate_controller_port": 19099,
     "gate_verify_interval": 30,
     "gate_verify_timeout": 8,
+    # Seconds an applied pf ruleset may stay unconfirmed before it self-reverts.
+    "gate_rollback_after": 20,
     # Node sources. Empty subscription URL falls back to v2rayN's stored one.
     "gate_subscription_url": "",
     "gate_v2rayn_db": "",

@@ -100,11 +100,49 @@ rules:
 
 `MAIN` 默认 `DIRECT`；设置 `gate_main_proxy`（例如 `127.0.0.1:7897`）会把它接成 HTTP 上游，让你现有的 Clash 继续服务非 Claude 流量。
 
+## pf 重定向
+
+门卫的代理端口只能保护"被告知要用它"的程序。要在 macOS 上让绕过不可能，重定向必须发生在内核里，而 pf 是唯一不需要 Apple entitlement 的手段。
+
+pf 无法按进程路径匹配，所以重定向是**整机级**的，由门卫按域名分流：Anthropic 域名走 `PINNED`，其余走 `MAIN`。
+
+```pf
+table <claudeguard_skip> { 127.0.0.0/8, <节点服务器 IP>, <上游代理 IP> }
+rdr pass on lo0 inet proto tcp from any to ! <claudeguard_skip> port 443 -> 127.0.0.1 port 17897
+rdr pass on lo0 inet proto tcp from any to ! <claudeguard_skip> port 80  -> 127.0.0.1 port 17897
+block drop out quick proto udp to any port 443
+```
+
+两个容易写错的地方，都已经在真机 `pfctl -n` 上验证过：
+
+1. **排除项必须用 table**。macOS pf 拒绝否定列表 `to ! { a, b }`（语法错误），只接受 `to ! <table>`。排除表里少了节点服务器 IP，门卫的上游连接会被重定向回自己，形成环路。
+2. **UDP:443 必须丢弃**。mihomo 在 macOS 上无法重定向 UDP（日志：`Failed to start Redir UDP Listener: not supported on current platform`），不阻断 QUIC 的话，Chromium 系客户端全部绕过门卫。
+
+### 安全模型
+
+- **不整表替换 pf**：规则集由 `/etc/pf.conf` 原文 + 一个锚点引用组成，应用时不会冲掉系统规则。
+- **先解析再加载**：`pfctl -n` 通过才会进入内核；解析失败只删除锚点文件，不改变任何行为。
+- **超期自动回滚**：应用时写入回滚期限（默认 20 秒），自检通过并 `pf verify` 确认后才清除；未确认就恢复 `/etc/pf.conf`。
+- **门卫不 READY 时拒绝应用**：否则全机 :443 会被导进一个关闭的门卫，等于断网。
+- **root helper 只应用用户态暂存的文件**：校验属主、拒绝符号链接，和现有 `hosts_helper.c` 同一套信任模型。
+
+### 命令
+
+```bash
+claudeguard pf check      # 生成并做语法检查，不加载（不需要 root）
+claudeguard pf apply      # 应用重定向（门卫必须 READY）
+claudeguard pf verify     # 自检并确认，不通过自动回滚
+claudeguard pf status     # 是否已应用 / 已确认 / 内核里有没有规则
+claudeguard pf clear      # 撤销，恢复 /etc/pf.conf
+```
+
+`pf apply` 需要 root helper（`native/gate_helper.sh` 安装为 LaunchDaemon）。在 helper 装好之前，`pf check` 仍然可用，用来验证规则语法。
+
 ## 当前限制
 
-- **还没有 pf 规则**：门卫只保护"主动把代理指向它"的流量。绕过代理端口直连的进程目前拦不住，这一层由 P2 的 pf 重定向负责。
+- **pf helper 还没装进 install.sh**：`native/gate_helper.sh` 已写好并通过 `sh -n`，但要等 `install.sh` 注册成 LaunchDaemon 才能被 `pf apply` 调用。
 - **macOS 上 redir 不支持 UDP**：mihomo 日志会报 `Failed to start Redir UDP Listener: not supported on current platform`。因此 QUIC/HTTP3 无法透明代理，只能由 pf 阻断 UDP:443 强制回落 TCP。
-- **桌面端尚未覆盖**：`Claude.app` 不读 `HTTPS_PROXY`，需要 pf 层在内核截获，或启动时加 `--proxy-server`。
+- **桌面端尚未验证**：pf 在内核层截获，理论上 `Claude.app` 从 Dock 启动也会被覆盖，但还没有在真机上跑通。
 - **mihomo 二进制**：默认会找到 Clash Verge 自带的那份，仅适合开发。正式使用请把独立副本放到 `~/.local/share/ClaudeGuard/bin/mihomo`。
 
 ## 与其他客户端共存
