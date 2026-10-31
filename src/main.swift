@@ -33,6 +33,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var state: GuardState = .offline
     var currentIP: String = "…"
     var protectionEnabled: Bool = true
+    var gateEnabled: Bool = false
     var blockAutoUpdates: Bool = true
     var modelOverrideEnabled: Bool = false
     var defaultModel: String = "claude-opus-4-8"
@@ -354,6 +355,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let newState: GuardState
         if !protectionEnabled {
             newState = .disabled
+        } else if gateEnabled {
+            // Gate mode: the pinned-exit verdict replaces the IP whitelist. The
+            // gate publishes it; a missing or stale file is treated as blocked.
+            let gatePath = NSString(string: "~/.config/claudeguard/gate/state.json").expandingTildeInPath
+            var gate: [String: Any] = [:]
+            if let d = try? Data(contentsOf: URL(fileURLWithPath: gatePath)),
+               let obj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] { gate = obj }
+            let updated = (gate["updated_at"] as? Double) ?? 0
+            let fresh = Date().timeIntervalSince1970 - updated <= 45
+            let gateState = (gate["state"] as? String) ?? "STOPPED"
+            let expected = (gate["expected_ip"] as? String) ?? ""
+            currentIP = expected.isEmpty ? "门卫未设置出口" : expected
+            if fresh && gateState == "READY" {
+                policyReason = (gate["reason"] as? String) ?? ""
+                newState = .allowed(ip: currentIP)
+            } else {
+                let why = (gate["reason"] as? String) ?? ""
+                policyReason = fresh ? (why.isEmpty ? "门卫未就绪（\(gateState)）" : why)
+                                     : "门卫状态未发布或已过期"
+                newState = .blocked(ip: currentIP)
+            }
         } else {
             let results = detectExits(mode: checkedMode)
             detectedIPs = results
@@ -764,6 +786,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let storedMode = json["ip_check_mode"] == nil ? "both" : ((json["ip_check_mode"] as? String) ?? "invalid")
         ipCheckMode = storedMode == "auto" ? "both" : storedMode
         if let p = json["protection_enabled"] as? Bool { protectionEnabled = p }
+        if let g = json["gate_enabled"] as? Bool { gateEnabled = g }
         if let u = json["block_auto_updates"] as? Bool { blockAutoUpdates = u }
         if let m = json["model_override_enabled"] as? Bool { modelOverrideEnabled = m }
         if let d = json["default_model"] as? String { defaultModel = d }

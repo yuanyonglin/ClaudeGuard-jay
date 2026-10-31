@@ -391,12 +391,20 @@ def render_config(node, options, token):
     return config
 
 
-def start_command(mihomo, directory, config_path, tun_enabled=False, use_sudo=False):
-    """argv for launching mihomo. TUN needs root, so it may need sudo -n."""
-    argv = [mihomo, "-d", str(directory), "-f", str(config_path)]
+GATE_WRAPPER = "/Library/Application Support/ClaudeGuard/gate-mihomo"
+
+
+def start_command(mihomo, directory, config_path, tun_enabled=False, use_sudo=False,
+                  wrapper=None):
+    """argv for launching mihomo.
+
+    TUN needs root, so it goes through the installed wrapper: that script checks
+    the config is a regular file owned by the config dir's owner before exec'ing
+    mihomo. Spawning mihomo directly as root would skip that check.
+    """
     if tun_enabled and use_sudo:
-        return ["sudo", "-n"] + argv
-    return argv
+        return ["sudo", "-n", wrapper or GATE_WRAPPER, str(directory), mihomo]
+    return [mihomo, "-d", str(directory), "-f", str(config_path)]
 
 
 def find_mihomo(explicit=None):

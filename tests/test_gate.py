@@ -319,10 +319,11 @@ class StartCommandTests(unittest.TestCase):
         argv = gate.start_command("/bin/mihomo", "/d", "/d/config.yaml")
         self.assertEqual(argv, ["/bin/mihomo", "-d", "/d", "-f", "/d/config.yaml"])
 
-    def test_tun_start_uses_sudo_when_not_root(self):
+    def test_tun_start_goes_through_the_validated_wrapper(self):
         argv = gate.start_command("/bin/mihomo", "/d", "/d/config.yaml",
                                   tun_enabled=True, use_sudo=True)
-        self.assertEqual(argv[:3], ["sudo", "-n", "/bin/mihomo"])
+        self.assertEqual(argv, ["sudo", "-n", gate.GATE_WRAPPER, "/d", "/bin/mihomo"])
+        self.assertNotIn("-f", argv)
 
     def test_tun_start_without_sudo_when_already_root(self):
         argv = gate.start_command("/bin/mihomo", "/d", "/d/config.yaml",

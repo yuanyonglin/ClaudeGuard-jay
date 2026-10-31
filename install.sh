@@ -265,7 +265,39 @@ fi
 # The compiled copy in the user dir is never executed now; drop it.
 rm -f "$INSTALL_DIR/bin/hosts-helper" 2>/dev/null || true
 
-# --- 8. First-run: offer to whitelist the current public IP -----------------
+# --- 8. Pinned-exit gate ----------------------------------------------------
+# The gate runs its own mihomo core. TUN mode needs root, so the privileged
+# part is a single root-owned wrapper that only verifies a staged config and
+# execs mihomo. The config and the verdict stay owned by the user daemon.
+info "Installing the pinned-exit gate wrapper…"
+mkdir -p "$CONFIG_DIR/gate"
+chmod 700 "$CONFIG_DIR/gate"
+
+install_gate_wrapper() {   # $1 = sudo prefix ("" when already root)
+    local S="$1"
+    $S mkdir -p "$HELPER_SYS_DIR"
+    $S cp "$SOURCE_DIR/native/gate_mihomo.sh" "$HELPER_SYS_DIR/gate-mihomo"
+    $S chown root:wheel "$HELPER_SYS_DIR/gate-mihomo"
+    $S chmod 755 "$HELPER_SYS_DIR/gate-mihomo"
+}
+
+if [ "$(id -u)" -eq 0 ]; then
+    install_gate_wrapper ""
+else
+    install_gate_wrapper "sudo"
+fi
+ok "gate-mihomo installed to $HELPER_SYS_DIR/gate-mihomo"
+
+if [ ! -f "$CONFIG_DIR/gate/node.json" ]; then
+    info "No pinned node yet. After installing, run:"
+    printf '%s\n' "     ${BOLD}claudeguard gate nodes${RST}            # list nodes from your v2rayN subscription"
+    printf '%s\n' "     ${BOLD}claudeguard gate import Osaka${RST}      # pin the Japan node"
+    printf '%s\n' "     ${BOLD}claudeguard gate probe${RST}            # measure its real exit IP (needs traffic)"
+    printf '%s\n' "     ${BOLD}claudeguard set-gate-expected-ip <IP>${RST}"
+    printf '%s\n' "     ${BOLD}claudeguard enable-gate${RST}"
+fi
+
+# --- 9. First-run: offer to whitelist the current public IP -----------------
 # Best done while you're connected to your VPN right now.
 CUR_IP="$(cd "$INSTALL_DIR" && python3 -c 'import sys; sys.path.insert(0,"."); from src.ip_checker import stun_public_ip; print(stun_public_ip() or "")' 2>/dev/null || true)"
 if [ -n "$CUR_IP" ] && [ -r /dev/tty ]; then
