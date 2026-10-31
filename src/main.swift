@@ -28,6 +28,7 @@ enum GuardState: Equatable {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
+    lazy var dashboard = DashboardWindow()
     var menu: NSMenu!
 
     var state: GuardState = .offline
@@ -156,6 +157,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupWakeObserver()     // re-verify after the Mac wakes from sleep
 
         startBlinking()
+        // Debug hook: open the dashboard at launch so the window can be verified
+        // without clicking the menu.
+        if CommandLine.arguments.contains("--dashboard") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.dashboard.show() }
+        }
         DispatchQueue.global(qos: .userInitiated).async { self.recheck() }
 
         // Fallback poll — catches a public-IP change with no local network event,
@@ -912,6 +918,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let openDash = NSMenuItem(title: "🪟 打开主界面…", action: #selector(onOpenDashboard), keyEquivalent: "d")
+        menu.addItem(openDash)
+
         let recheck = NSMenuItem(title: "🔄 重新检测", action: #selector(onRecheck), keyEquivalent: "")
         recheck.target = self
         menu.addItem(recheck)
@@ -1169,6 +1178,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc func onOpenDashboard() { dashboard.show() }
+
     @objc func onRecheck() { recheckAsync() }
 
     @objc func onSelectIPCheckMode(_ sender: NSMenuItem) {
@@ -1260,3 +1271,162 @@ app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()
+
+
+// MARK: - Dashboard window
+
+/// The menu bar is fine for a glance; this window is for the gate, which has
+/// more state than a menu can carry: pinned node, expected vs observed exit,
+/// and the actions that change them.
+final class DashboardWindow: NSObject {
+    private var window: NSWindow?
+    private var timer: Timer?
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let gateLabel = NSTextField(labelWithString: "")
+    private let nodeLabel = NSTextField(labelWithString: "")
+    private let ipLabel = NSTextField(labelWithString: "")
+    private let messageLabel = NSTextField(labelWithString: "")
+    private let eventsLabel = NSTextField(labelWithString: "")
+
+    private func expand(_ path: String) -> String {
+        NSString(string: path).expandingTildeInPath
+    }
+    private var configPath: String { expand("~/.config/claudeguard/config.json") }
+    private var gateStatePath: String { expand("~/.config/claudeguard/gate/state.json") }
+    private var gateNodePath: String { expand("~/.config/claudeguard/gate/node.json") }
+    private var eventPath: String { expand("~/.config/claudeguard/events.jsonl") }
+    private var cliPath: String { expand("~/.local/share/ClaudeGuard/bin/claudeguard") }
+
+    func show() {
+        if window == nil { build() }
+        refresh()
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+    }
+
+    private func readJSON(_ path: String) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        return obj
+    }
+
+    private func build() {
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 420),
+                         styleMask: [.titled, .closable, .miniaturizable],
+                         backing: .buffered, defer: false)
+        w.title = "ClaudeGuard"
+        w.center()
+        w.isReleasedWhenClosed = false
+
+        statusLabel.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+        for label in [gateLabel, nodeLabel, ipLabel, messageLabel, eventsLabel] {
+            label.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            label.lineBreakMode = .byWordWrapping
+            label.maximumNumberOfLines = 0
+        }
+        eventsLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+
+        let verify = NSButton(title: "门卫复检", target: self, action: #selector(onVerify))
+        let start = NSButton(title: "启动门卫", target: self, action: #selector(onStart))
+        let stop = NSButton(title: "停止门卫", target: self, action: #selector(onStop))
+        let row = NSStackView(views: [verify, start, stop])
+        row.orientation = .horizontal
+        row.spacing = 8
+
+        let stack = NSStackView(views: [statusLabel, gateLabel, nodeLabel, ipLabel, row, messageLabel, eventsLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = NSView()
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+        w.contentView = content
+        window = w
+    }
+
+    func refresh() {
+        guard window != nil else { return }
+        let cfg = readJSON(configPath) ?? [:]
+        let gate = readJSON(gateStatePath) ?? [:]
+        let node = readJSON(gateNodePath) ?? [:]
+
+        let gateOn = (cfg["gate_enabled"] as? Bool) ?? false
+        let rawState = (gate["state"] as? String) ?? "STOPPED"
+        let updated = (gate["updated_at"] as? Double) ?? 0
+        let fresh = Date().timeIntervalSince1970 - updated <= 45
+        let shownState = fresh ? rawState : "STOPPED（状态过期）"
+
+        statusLabel.stringValue = gateOn ? "判定来源：门卫（固定出口）" : "判定来源：IP 白名单"
+
+        let reason = (gate["reason"] as? String) ?? ""
+        gateLabel.stringValue = "门卫状态：\(shownState)" + (reason.isEmpty ? "" : "\n原因：\(reason)")
+
+        let name = (node["name"] as? String) ?? "未固定节点"
+        let server = (node["server"] as? String) ?? "-"
+        let port = (node["port"] as? Int) ?? 0
+        nodeLabel.stringValue = "固定节点：\(name)  \(server):\(port)"
+
+        let expected = (gate["expected_ip"] as? String) ?? ""
+        let observed = (gate["observed_ip"] as? String) ?? ""
+        ipLabel.stringValue = "固定出口：\(expected.isEmpty ? "未设置" : expected)\n实测出口：\(observed.isEmpty ? "未验证" : observed)"
+
+        eventsLabel.stringValue = "最近事件\n" + recentEvents()
+    }
+
+    private func recentEvents() -> String {
+        guard let text = try? String(contentsOfFile: eventPath, encoding: .utf8) else { return "（无）" }
+        let lines = text.split(separator: "\n").suffix(5)
+        var out: [String] = []
+        for line in lines {
+            guard let data = line.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
+            let stamp = ((obj["time"] as? String) ?? "").dropFirst(11).prefix(8)
+            let event = (obj["event"] as? String) ?? ""
+            let state = (obj["state"] as? String) ?? ""
+            out.append("  \(stamp)  \(event) \(state)")
+        }
+        return out.isEmpty ? "（无）" : out.joined(separator: "\n")
+    }
+
+    private func run(_ args: [String]) {
+        messageLabel.stringValue = "执行中…"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cliPath)
+        process.arguments = args
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+        } catch {
+            messageLabel.stringValue = "无法执行：\(error.localizedDescription)"
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let text = String(data: data, encoding: .utf8) ?? ""
+            let last = text.split(separator: "\n").last.map(String.init) ?? ""
+            DispatchQueue.main.async {
+                self?.messageLabel.stringValue = last.isEmpty ? "完成" : last
+                self?.refresh()
+            }
+        }
+    }
+
+    @objc private func onVerify() { run(["gate", "verify"]) }
+    @objc private func onStart() { run(["gate", "start"]) }
+    @objc private func onStop() { run(["gate", "stop"]) }
+}
