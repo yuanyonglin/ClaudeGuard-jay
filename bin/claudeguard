@@ -65,6 +65,7 @@ ClaudeGuard：按出口 IP 白名单保护 Claude
   gate start           启动门卫并立即验证出口
   gate stop            停止门卫
   gate verify          重新验证出口，通过才放行
+  gate probe           只测出口 IP，不做判定（用于确定 expected_ip）
   gate watch           持续复检并发布状态（LaunchAgent 用；--once 只跑一次）
   gate nodes           列出订阅里的节点（默认读 v2rayN 的订阅）
                        可选：--v2rayn [库路径] | --url <订阅地址> | --file <路径> | --proxy <host:port>
@@ -585,6 +586,37 @@ def gate_command(config, args):
         print(f"   写入：{config.gate_node_path}")
         print("   下一步： claudeguard set-gate-expected-ip <该节点的出口 IP>")
         return
+
+    if action == "probe":
+        # 只探测，不做判定：expected_ip 还没确定时也能用
+        from src.gate import PROBE_URLS
+        try:
+            if not gate.running():
+                print("门卫未运行，先启动 mihomo…")
+                gate.start()
+        except (RuntimeError, OSError) as exc:
+            print(f"❌ 启动失败：{exc}")
+            sys.exit(1)
+
+        observed, errors = gate.probe()
+        print("=== 经固定节点的出口 IP ===")
+        for label, _ in PROBE_URLS:
+            print(f"  {label:11} {observed.get(label) or '未获取'}")
+        for label, err in errors.items():
+            print(f"  {label} 失败：{err[:90]}")
+
+        values = {value for value in observed.values() if value}
+        if len(values) == 1 and len(observed) == len(PROBE_URLS):
+            ip = values.pop()
+            print(f"\n✅ 两个来源一致：{ip}")
+            print(f"   固定下来： claudeguard set-gate-expected-ip {ip}")
+            sys.exit(0)
+        if values:
+            print(f"\n⚠️  来源不一致或不完整：{', '.join(sorted(values))}")
+            print("   不能据此固定出口，先查节点或链路。")
+        else:
+            print("\n❌ 两个来源都没拿到出口 IP（节点无流量或链路不通）。")
+        sys.exit(1)
 
     if action == "watch":
         import time

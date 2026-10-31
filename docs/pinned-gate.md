@@ -37,13 +37,16 @@ claudeguard gate nodes
 # 2. 固定其中一个
 claudeguard gate import 2
 
-# 3. 指定该节点的出口 IP（在节点可用时用 curl 确认）
+# 3. 测出该节点的真实出口 IP（订阅里的地址是入口，不一定是出口）
+claudeguard gate probe
+
+# 4. 把探测结果固定下来
 claudeguard set-gate-expected-ip 203.0.113.10
 
-# 4. 启动并验证
+# 5. 启动并验证
 claudeguard gate start
 
-# 5. 以门卫为判定依据
+# 6. 以门卫为判定依据
 claudeguard enable-gate
 ```
 
@@ -54,6 +57,15 @@ claudeguard gate nodes --url https://example.com/sub?token=...   # 任意订阅�
 claudeguard gate nodes --file ./nodes.txt                        # 本地分享链接列表
 claudeguard gate nodes --v2rayn [~/path/guiNDB.db]               # 指定 v2rayN 数据库
 ```
+
+## 入口 IP 与出口 IP
+
+客户端里显示的"地址"是**入口**（你连到哪台服务器），不是**出口**（网站看到你是谁）。两者可能不同：
+
+- 直连 VPS 通常相同；
+- 服务商做中转或 NAT 时不同，出口甚至可能在多个 IP 之间轮换。
+
+`gate probe` 会经固定节点问两个独立来源（ipify 与 Cloudflare），只有两边一致才给出可用值。出口若在轮换，这一步就会显示不一致，此时不能固定单一 `expected_ip`。
 
 ## 订阅兼容
 
