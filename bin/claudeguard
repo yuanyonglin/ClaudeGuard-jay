@@ -59,6 +59,16 @@ ClaudeGuard：按出口 IP 白名单保护 Claude
   stop                 停止菜单栏守护，已有网络限制不会自动解除
   install-cli-wrapper  为 claude 命令安装启动检查
   set-cli-path <path>  指定原始 Claude Code 程序的路径
+
+门卫（固定出口）：
+  gate status          查看门卫状态、固定出口和实测出口
+  gate start           启动门卫并立即验证出口
+  gate stop            停止门卫
+  gate verify          重新验证出口，通过才放行
+  set-gate-node <path> 指定固定节点文件（JSON）
+  set-gate-expected-ip <IP>  指定该节点的固定出口 IPv4
+  enable-gate          启用以门卫为判定依据的保护
+  disable-gate         关闭门卫判定，回到纯 IP 白名单
 """
     print(help_text.strip())
 
@@ -266,10 +276,117 @@ def main():
         config.save_config()
         print(f"✅ 原始 Claude Code 路径已设为：{path}")
 
+    elif cmd == "gate":
+        gate_command(config, sys.argv[2:])
+
+    elif cmd == "set-gate-node":
+        if len(sys.argv) < 3:
+            print("请输入节点文件路径，例如： claudeguard set-gate-node ~/.config/claudeguard/gate/node.json")
+            sys.exit(1)
+        from src import gate as gate_lib
+        path = os.path.expanduser(sys.argv[2])
+        if not os.path.isfile(path):
+            print(f"节点文件不存在：{path}")
+            sys.exit(1)
+        try:
+            node = gate_lib.load_node(path)
+        except (ValueError, OSError) as exc:
+            print(f"节点文件无效：{exc}")
+            sys.exit(1)
+        config.config["gate_node_path"] = path
+        config.save_config()
+        print(f"✅ 固定节点已设为：{node['name']}（{node['server']}:{node['port']}）")
+
+    elif cmd == "set-gate-expected-ip":
+        if len(sys.argv) < 3:
+            print("请输入该节点的固定出口 IP，例如： claudeguard set-gate-expected-ip 203.0.113.10")
+            sys.exit(1)
+        import ipaddress
+        value = sys.argv[2].strip()
+        try:
+            ipaddress.IPv4Address(value)
+        except ValueError:
+            print(f"不是有效的 IPv4 地址：{value}")
+            sys.exit(1)
+        config.config["gate_expected_ip"] = value
+        config.save_config()
+        print(f"✅ 门卫固定出口已设为：{value}")
+
+    elif cmd in ("enable-gate", "disable-gate"):
+        if cmd == "enable-gate":
+            from src import gate as gate_lib
+            node_path = config.gate_node_path
+            if not os.path.isfile(node_path):
+                print(f"未找到节点文件：{node_path}")
+                print("请先运行 claudeguard set-gate-node <路径> 指定固定节点。")
+                sys.exit(1)
+            try:
+                gate_lib.load_node(node_path)
+            except (ValueError, OSError) as exc:
+                print(f"节点文件无效：{exc}")
+                sys.exit(1)
+            if not config.config.get("gate_expected_ip"):
+                print("尚未设置固定出口 IP，请先运行 claudeguard set-gate-expected-ip <IP>。")
+                sys.exit(1)
+        config.gate_enabled = cmd == "enable-gate"
+        print(f"✅ 门卫已{'启用' if config.gate_enabled else '关闭'}。")
+
     else:
         print(f"无法识别命令：{cmd}")
         print_help()
         sys.exit(1)
+
+def gate_command(config, args):
+    """Manage the pinned-exit gate. P1 scope: process, config and verdict only —
+    no pf rules yet, so a running gate protects traffic that goes through it but
+    does not yet catch a process that bypasses the proxy port."""
+    from src import gate as gate_lib
+
+    action = (args[0] if args else "status").lower()
+    gate = gate_lib.Gate(node_path=config.gate_node_path,
+                         options=config.gate_settings(),
+                         mihomo=config.gate_mihomo_path or None)
+
+    if action == "status":
+        status = gate.status()
+        state = status["state"]
+        mark = {"READY": "🟢", "BLOCKED": "🔴", "STARTING": "🟡"}.get(state, "⚪")
+        print("=== 门卫状态 ===")
+        print(f"状态：{mark} {state}")
+        print(f"进程：{'运行中' if status['running'] else '未运行'}")
+        print(f"mihomo：{status['mihomo'] or '未找到'}")
+        print(f"代理端口：{status['proxy_port']}（探针 {gate.options['probe_port']}）")
+        print(f"固定出口：{status['expected_ip'] or '未设置'}")
+        print(f"实测出口：{status['observed_ip'] or '未验证'}")
+        if status["reason"]:
+            print(f"原因：{status['reason']}")
+        sys.exit(0 if state == "READY" else 1)
+
+    if action == "start":
+        try:
+            gate.start()
+        except (RuntimeError, OSError) as exc:
+            print(f"❌ 门卫启动失败：{exc}")
+            sys.exit(1)
+        status = gate.verify()
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        sys.exit(0 if status["state"] == "READY" else 1)
+
+    if action == "stop":
+        print(json.dumps(gate.stop(), ensure_ascii=False, indent=2))
+        return
+
+    if action == "verify":
+        if not gate.running():
+            print("门卫未运行，请先运行 claudeguard gate start。")
+            sys.exit(1)
+        status = gate.verify()
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        sys.exit(0 if status["state"] == "READY" else 1)
+
+    print("用法： claudeguard gate <status|start|stop|verify>")
+    sys.exit(1)
+
 
 def doctor(config):
     """Report on every hook ClaudeGuard owns, then re-attach whatever came loose.

@@ -41,7 +41,20 @@ DEFAULT_CONFIG = {
         "desktop-app-updates.anthropic.com"
     ],
     "real_claude_cli_path": "/opt/homebrew/bin/claude",
-    "real_claude_app_path": "/Applications/Claude.app"
+    "real_claude_app_path": "/Applications/Claude.app",
+    # Pinned-exit gate. Off by default: it needs a node file and a mihomo binary.
+    # Ports deliberately avoid 7895/7897/7898/7899 (Clash Verge) and 10808 (v2rayN).
+    "gate_enabled": False,
+    "gate_node_path": "",
+    "gate_mihomo_path": "",
+    "gate_expected_ip": "",
+    "gate_interface_name": "",
+    "gate_proxy_port": 17899,
+    "gate_probe_port": 17898,
+    "gate_redir_port": 17897,
+    "gate_controller_port": 19099,
+    "gate_verify_interval": 30,
+    "gate_verify_timeout": 8
 }
 
 class ConfigManager:
@@ -158,3 +171,36 @@ class ConfigManager:
             raise ValueError("ip_check_mode 只能设为 both、http 或 stun")
         self.config["ip_check_mode"] = value
         self.save_config()
+
+    # --- pinned-exit gate -------------------------------------------------
+
+    @property
+    def gate_enabled(self):
+        return bool(self.config.get("gate_enabled", False))
+
+    @gate_enabled.setter
+    def gate_enabled(self, value):
+        self.config["gate_enabled"] = bool(value)
+        self.save_config()
+
+    @property
+    def gate_node_path(self):
+        """Pinned node file; defaults next to this config file."""
+        value = (self.config.get("gate_node_path") or "").strip()
+        if value:
+            return os.path.expanduser(value)
+        return os.path.join(os.path.dirname(self.path), "gate", "node.json")
+
+    @property
+    def gate_mihomo_path(self):
+        return (self.config.get("gate_mihomo_path") or "").strip()
+
+    def gate_settings(self):
+        """Gate options in the shape src.gate.settings() expects."""
+        from src.gate import DEFAULTS as GATE_DEFAULTS
+        data = {}
+        for key in GATE_DEFAULTS:
+            value = self.config.get(f"gate_{key}")
+            if value is not None and value != "":
+                data[key] = value
+        return data
