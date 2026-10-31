@@ -350,7 +350,6 @@ def render_config(node, options, token):
 
     config = {
         "mixed-port": options["proxy_port"],
-        "redir-port": options["redir_port"],
         "allow-lan": False,
         "bind-address": "127.0.0.1",
         "mode": "rule",
@@ -370,6 +369,11 @@ def render_config(node, options, token):
         }],
         "rules": rules,
     }
+    # redir-port is only useful for pf redirection. With TUN it is dead weight,
+    # and macOS cannot start its UDP half anyway.
+    if not options.get("tun_enabled"):
+        config["redir-port"] = options["redir_port"]
+
     if options.get("interface_name"):
         config["interface-name"] = options["interface_name"]
 
@@ -385,6 +389,14 @@ def render_config(node, options, token):
             "dns-hijack": ["any:53"],
         }
     return config
+
+
+def start_command(mihomo, directory, config_path, tun_enabled=False, use_sudo=False):
+    """argv for launching mihomo. TUN needs root, so it may need sudo -n."""
+    argv = [mihomo, "-d", str(directory), "-f", str(config_path)]
+    if tun_enabled and use_sudo:
+        return ["sudo", "-n"] + argv
+    return argv
 
 
 def find_mihomo(explicit=None):
@@ -481,11 +493,13 @@ class Gate:
             raise RuntimeError("未找到 mihomo 可执行文件，请设置 gate_mihomo_path")
         self.write_config()
         self.ensure_dir()
+        tun = bool(self.options.get("tun_enabled"))
+        use_sudo = tun and os.geteuid() != 0
+        argv = start_command(self.mihomo, self.dir, self.config_path, tun, use_sudo)
         log = open(self.log_path, "ab")
         try:
             proc = subprocess.Popen(
-                [self.mihomo, "-d", str(self.dir), "-f", str(self.config_path)],
-                stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                argv, stdout=log, stderr=log, stdin=subprocess.DEVNULL,
                 start_new_session=True, cwd=str(self.dir))
         finally:
             log.close()
@@ -495,7 +509,8 @@ class Gate:
         while time.time() < deadline:
             if proc.poll() is not None:
                 self.state = "STOPPED"
-                self.reason = "mihomo 启动即退出，请查看 gate.log"
+                tail = self._log_tail()
+                self.reason = ("mihomo 启动即退出" + (f"：{tail}" if tail else "，请查看 gate.log"))
                 raise RuntimeError(self.reason)
             try:
                 self.controller("GET", "/version", timeout=2)
@@ -508,6 +523,16 @@ class Gate:
         self.state = "STOPPED"
         self.reason = "mihomo 控制器未在限定时间内就绪"
         raise RuntimeError(self.reason)
+
+    def _log_tail(self, lines=3):
+        """Last useful lines of gate.log, for the failure message."""
+        try:
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as handle:
+                tail = handle.read().splitlines()[-lines:]
+        except OSError:
+            return ""
+        cleaned = [line.split("msg=")[-1].strip().strip('"') for line in tail if line.strip()]
+        return " | ".join(cleaned)[:200]
 
     def stop(self, timeout=10):
         pid = self.pid()

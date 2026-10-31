@@ -652,6 +652,15 @@ def gate_command(config, args):
         sys.exit(0 if state == "READY" else 1)
 
     if action == "start":
+        # TUN needs root; say so before spawning something that will die.
+        if gate.options.get("tun_enabled") and os.geteuid() != 0:
+            probe = subprocess.run(["sudo", "-n", "true"], capture_output=True)
+            if probe.returncode != 0:
+                print("❌ TUN 模式需要 root，但当前没有可用的 sudo 凭据。")
+                print("   任选一种：")
+                print("     1. sudo -v   # 先缓存凭据，然后立刻重跑本命令")
+                print("     2. 安装 LaunchDaemon 后由系统以 root 启动（install.sh）")
+                sys.exit(1)
         try:
             gate.start()
         except (RuntimeError, OSError) as exc:

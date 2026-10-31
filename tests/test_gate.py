@@ -147,6 +147,11 @@ class RenderTests(unittest.TestCase):
                                         gate.settings({**OPTIONS, "interface_name": "en0"}), "tok")
         self.assertEqual(with_iface["interface-name"], "en0")
 
+    def test_redir_port_is_dropped_when_tun_is_used(self):
+        config = gate.render_config(gate.validate_node(NODE),
+                                    gate.settings({**OPTIONS, "tun_enabled": True}), "tok")
+        self.assertNotIn("redir-port", config)
+
     def test_tun_is_absent_by_default(self):
         self.assertNotIn("tun", self.config)
 
@@ -307,6 +312,22 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(result["state"], "BLOCKED")
         self.assertIn("upstream gone", result["reason"])
         self.assertEqual(gate.read_state(self.temp.name)["state"], "BLOCKED")
+
+
+class StartCommandTests(unittest.TestCase):
+    def test_plain_start_has_no_sudo(self):
+        argv = gate.start_command("/bin/mihomo", "/d", "/d/config.yaml")
+        self.assertEqual(argv, ["/bin/mihomo", "-d", "/d", "-f", "/d/config.yaml"])
+
+    def test_tun_start_uses_sudo_when_not_root(self):
+        argv = gate.start_command("/bin/mihomo", "/d", "/d/config.yaml",
+                                  tun_enabled=True, use_sudo=True)
+        self.assertEqual(argv[:3], ["sudo", "-n", "/bin/mihomo"])
+
+    def test_tun_start_without_sudo_when_already_root(self):
+        argv = gate.start_command("/bin/mihomo", "/d", "/d/config.yaml",
+                                  tun_enabled=True, use_sudo=False)
+        self.assertNotIn("sudo", argv)
 
 
 class DiscoveryTests(unittest.TestCase):
