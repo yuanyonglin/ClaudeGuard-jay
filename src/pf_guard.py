@@ -102,23 +102,42 @@ def render_anchor(options, node):
         f"port 443 -> 127.0.0.1 port {redir}",
         f"rdr pass on lo0 inet proto tcp from any to ! <{SKIP_TABLE}> "
         f"port 80 -> 127.0.0.1 port {redir}",
-        "# QUIC cannot be redirected on macOS, so it must not escape",
-        "block drop out quick proto udp to any port 443",
     ]
     return "\n".join(lines) + "\n"
 
 
+# pf evaluates rules in stage order — options, normalization, queuing,
+# translation, filtering — and refuses a file that interleaves them. `rdr` is a
+# translation rule, so it must sit before the first filtering statement.
+FILTERING_PREFIXES = ("anchor ", "pass ", "block ", "match ")
+
+
 def render_ruleset(anchor_path=ANCHOR_SYSTEM_PATH, stock_path=PF_CONF):
-    """Stock ruleset plus our anchor, so applying never wipes system rules."""
+    """Stock ruleset plus our anchor, so applying never wipes system rules.
+
+    Our anchor is referenced with `rdr-anchor`, not `anchor`: the rules inside it
+    are translation rules, and an anchor pulled in by the filter stage would not
+    redirect anything.
+    """
     with open(stock_path, encoding="utf-8") as handle:
-        stock = handle.read().rstrip("\n")
-    return "\n".join([
-        "# ClaudeGuard pinned gate — generated from " + stock_path,
-        stock,
-        "",
-        f'anchor "{ANCHOR_NAME}"',
-        f'load anchor "{ANCHOR_NAME}" from "{anchor_path}"',
-    ]) + "\n"
+        stock = handle.read().splitlines()
+
+    lines = []
+    inserted = False
+    for line in stock:
+        if not inserted and line.strip().startswith(FILTERING_PREFIXES):
+            lines.append(f'rdr-anchor "{ANCHOR_NAME}"')
+            inserted = True
+        lines.append(line)
+    if not inserted:
+        lines.append(f'rdr-anchor "{ANCHOR_NAME}"')
+
+    lines.append(f'load anchor "{ANCHOR_NAME}" from "{anchor_path}"')
+    # QUIC cannot be redirected on macOS, so it must not escape.
+    lines.append("block drop out quick proto udp to any port 443")
+
+    header = "# ClaudeGuard pinned gate — generated from " + stock_path
+    return header + "\n" + "\n".join(lines) + "\n"
 
 
 ALLOWED_PREFIXES = ("rdr ", "block ", "table ", "scrub-anchor", "nat-anchor", "rdr-anchor",

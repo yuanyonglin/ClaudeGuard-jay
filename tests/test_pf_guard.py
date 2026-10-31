@@ -28,12 +28,14 @@ class SettingsTests(unittest.TestCase):
 
 
 class RenderTests(unittest.TestCase):
-    def test_anchor_redirects_and_drops_quic(self):
+    def test_anchor_redirects_80_and_443(self):
         text = pf_guard.render_anchor(OPTIONS, NODE)
         self.assertIn("rdr pass on lo0 inet proto tcp", text)
         self.assertIn("port 443 -> 127.0.0.1 port 17897", text)
         self.assertIn("port 80 -> 127.0.0.1 port 17897", text)
-        self.assertIn("block drop out quick proto udp to any port 443", text)
+        # The UDP drop is a filter rule: it belongs in the main ruleset, not in
+        # an anchor referenced by rdr-anchor.
+        self.assertNotIn("block", text)
 
     def test_exclusions_cover_loopback_node_and_upstream(self):
         exclude = pf_guard.exclusions(OPTIONS, NODE)
@@ -53,6 +55,28 @@ class RenderTests(unittest.TestCase):
         self.assertIn(f"table <{pf_guard.SKIP_TABLE}>", text)
         self.assertNotIn("! {", text)
         self.assertIn(f"! <{pf_guard.SKIP_TABLE}>", text)
+
+    def test_ruleset_drops_quic_in_the_filter_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            stock = os.path.join(temp, "pf.conf")
+            with open(stock, "w", encoding="utf-8") as handle:
+                handle.write(STOCK)
+            text = pf_guard.render_ruleset(stock_path=stock)
+        self.assertIn("block drop out quick proto udp to any port 443", text)
+
+    def test_rdr_anchor_is_declared_before_any_filter_statement(self):
+        """pf rejects a file that interleaves translation and filter stages."""
+        with tempfile.TemporaryDirectory() as temp:
+            stock = os.path.join(temp, "pf.conf")
+            with open(stock, "w", encoding="utf-8") as handle:
+                handle.write(STOCK)
+            text = pf_guard.render_ruleset(stock_path=stock)
+        lines = [line.strip() for line in text.splitlines()]
+        rdr_index = lines.index('rdr-anchor "com.claudeguard.gate"')
+        anchor_index = lines.index('anchor "com.apple/*"')
+        block_index = next(i for i, line in enumerate(lines) if line.startswith("block "))
+        self.assertLess(rdr_index, anchor_index)
+        self.assertLess(anchor_index, block_index)
 
     def test_ruleset_keeps_stock_lines(self):
         with tempfile.TemporaryDirectory() as temp:
