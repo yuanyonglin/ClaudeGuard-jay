@@ -1425,6 +1425,15 @@ final class DashboardWindow: NSObject {
     private var window: NSWindow?
     private var timer: Timer?
 
+    // Fixed 24h format: the system locale may be Korean (or anything else), and
+    // a localized "오전 12:00:33" reads badly in a Chinese UI.
+    private static let clock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
     private let headline = NSTextField(labelWithString: "")
     private let heroSubtitle = NSTextField(labelWithString: "")
     private let heroMode = NSTextField(labelWithString: "")
@@ -1487,6 +1496,8 @@ final class DashboardWindow: NSObject {
         box.fillColor = .controlBackgroundColor
         box.borderColor = .separatorColor
         box.borderWidth = 1
+        box.setContentHuggingPriority(.required, for: .vertical)
+        box.setContentCompressionResistancePriority(.required, for: .vertical)
         box.contentViewMargins = insets
         if let content = box.contentView {
             content.addSubview(stack)
@@ -1600,8 +1611,10 @@ final class DashboardWindow: NSObject {
             ])
         }
 
+        let verifyButton = button("复检出口", #selector(onVerify), primary: true)
+        verifyButton.keyEquivalent = "\r"
         let primaryRow = equalRow([
-            button("复检出口", #selector(onVerify), primary: true),
+            verifyButton,
             button("停止门卫", #selector(onStop)),
         ])
         let secondaryRow = equalRow([
@@ -1674,7 +1687,6 @@ final class DashboardWindow: NSObject {
         root.spacing = 12
         root.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         root.translatesAutoresizingMaskIntoConstraints = false
-        root.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
 
         for item in [heroBox, primaryRow, secondaryRow, statusBox, detailsCard, footer] {
             item.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
@@ -1693,7 +1705,9 @@ final class DashboardWindow: NSObject {
             root.bottomAnchor.constraint(equalTo: background.bottomAnchor),
         ])
         window.contentView = background
-        window.setContentSize(NSSize(width: 540, height: 720))
+        background.layoutSubtreeIfNeeded()
+        let fit = root.fittingSize
+        window.setContentSize(NSSize(width: 540, height: ceil(fit.height)))
         self.window = window
     }
 
@@ -1768,7 +1782,7 @@ final class DashboardWindow: NSObject {
             heroSubtitle.stringValue = reason
         }
 
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let stamp = Self.clock.string(from: Date())
         statusLine.stringValue = "已重新读取状态文件（不等于执行自检），读取时间 \(stamp)"
 
         checkProcess.set(title: "门卫进程",
@@ -1784,10 +1798,11 @@ final class DashboardWindow: NSObject {
                       detail: expected.isEmpty ? "未设置固定出口" : "期望 \(expected) · 实测 \(observed.isEmpty ? "未验证" : observed)",
                       status: !gateOn ? "未启用" : (exitOK ? "正常" : "异常"),
                       ok: exitOK, enabled: gateOn)
+        let tunEnabled = (config["gate_tun_enabled"] as? Bool) ?? true
         checkTun.set(title: "TUN 捕获",
-                     detail: tun ? "198.18.0.1 · 全机流量进入门卫" : "未检测到 TUN 接口",
-                     status: !gateOn ? "未启用" : (tun ? "正常" : "异常"),
-                     ok: tun, enabled: gateOn)
+                     detail: !tunEnabled ? "代理模式：仅覆盖使用门卫端口的程序" : (tun ? "198.18.0.1 · 全机流量进入门卫" : "未检测到 TUN 接口"),
+                     status: !gateOn || !tunEnabled ? "未启用" : (tun ? "正常" : "异常"),
+                     ok: tun, enabled: gateOn && tunEnabled)
         checkFresh.set(title: "验证时效",
                        detail: updated == 0 ? "尚未验证" : "\(Int(age)) 秒前 · 上限 45 秒",
                        status: !gateOn ? "未启用" : (fresh ? "正常" : "异常"),
