@@ -638,6 +638,14 @@ def gate_command(config, args):
 
     if action == "status":
         status = gate.status()
+        if status["running"]:
+            # This instance never verified anything; the verdict lives in the
+            # file the running supervisor published.
+            published = gate_lib.read_state(config.gate_dir, max_age=10 ** 9)
+            if published:
+                for key in ("state", "reason", "expected_ip", "observed_ip", "last_verified"):
+                    if key in published:
+                        status[key] = published[key]
         state = status["state"]
         mark = {"READY": "🟢", "BLOCKED": "🔴", "STARTING": "🟡"}.get(state, "⚪")
         print("=== 门卫状态 ===")

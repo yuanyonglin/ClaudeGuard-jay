@@ -567,7 +567,7 @@ class Gate:
             pass
         self.state = "STOPPED"
         self.reason = "gate stopped"
-        return self.status()
+        return self.publish()
 
     # -- controller --
 
@@ -632,13 +632,17 @@ class Gate:
 
         The probe runs on its own listener, so a failed verification leaves the
         GATE group on REJECT and Claude never sees the unverified exit.
+
+        Every path publishes the verdict. The daemon, the dashboard and the CLI
+        all read state.json, so a verdict that only existed in this process would
+        leave them staring at a missing or stale file.
         """
         expected = self.options["expected_ip"]
         if not expected:
             self.set_gate(REJECT)
             self.state = "BLOCKED"
             self.reason = "未配置 expected_ip，拒绝放行"
-            return self.status()
+            return self.publish()
 
         observed, errors = self.probe()
         self.observed_ip = "; ".join(f"{k}={v or '未获取'}" for k, v in observed.items())
@@ -650,19 +654,19 @@ class Gate:
             self.set_gate(REJECT)
             self.state = "BLOCKED"
             self.reason = f"出口与预期不符（期望 {expected}）：{', '.join(mismatch)}"
-            return self.status()
+            return self.publish()
         if missing:
             self.set_gate(REJECT)
             self.state = "BLOCKED"
             detail = "; ".join(f"{k}: {errors.get(k, '无结果')}" for k in missing)
             self.reason = f"无法确认出口 IP：{detail}"
-            return self.status()
+            return self.publish()
 
         self.set_gate(PINNED)
         self.state = "READY"
         self.reason = f"固定出口已验证：{expected}"
         self.last_verified = time.time()
-        return self.status()
+        return self.publish()
 
     def status(self):
         return {
