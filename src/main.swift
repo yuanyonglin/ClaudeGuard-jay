@@ -1366,50 +1366,95 @@ enum ClaudeControl {
 /// The menu bar is fine for a glance; this window carries the gate, which has
 /// more state than a menu can show. It reads the same published files the
 /// daemon uses and drives everything through the CLI, so the two cannot disagree.
+private final class CheckRow {
+    let view: NSStackView
+    private let dot = NSView()
+    private let title = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
+    private let status = NSTextField(labelWithString: "")
+
+    init() {
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 4
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 8),
+            dot.heightAnchor.constraint(equalToConstant: 8),
+        ])
+
+        title.font = .systemFont(ofSize: 12, weight: .medium)
+        detail.font = .systemFont(ofSize: 11)
+        detail.textColor = .secondaryLabelColor
+        detail.lineBreakMode = .byTruncatingTail
+        detail.maximumNumberOfLines = 1
+        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        status.font = .systemFont(ofSize: 11, weight: .medium)
+        status.alignment = .right
+        status.setContentHuggingPriority(.required, for: .horizontal)
+        status.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let text = NSStackView(views: [title, detail])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 1
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView(views: [dot, text, spacer, status])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        row.distribution = .fill
+        view = row
+    }
+
+    func set(title: String, detail: String, status: String, ok: Bool, enabled: Bool = true) {
+        self.title.stringValue = title
+        self.detail.stringValue = detail
+        self.status.stringValue = status
+        let color: NSColor = enabled ? (ok ? .systemGreen : .systemRed) : .tertiaryLabelColor
+        dot.layer?.backgroundColor = color.cgColor
+        self.status.textColor = color
+    }
+}
+
 final class DashboardWindow: NSObject {
     private var window: NSWindow?
     private var timer: Timer?
 
-    private let dot = NSView()
     private let headline = NSTextField(labelWithString: "")
-    private let subtitle = NSTextField(labelWithString: "")
-    private let gateStateValue = NSTextField(labelWithString: "")
-    private let gateNodeValue = NSTextField(labelWithString: "")
-    private let gateExpectedValue = NSTextField(labelWithString: "")
-    private let gateObservedValue = NSTextField(labelWithString: "")
-    private let procValue = NSTextField(labelWithString: "")
-    private let messageLabel = NSTextField(labelWithString: "")
-    private let eventsText = NSTextView()
+    private let heroSubtitle = NSTextField(labelWithString: "")
+    private let heroMode = NSTextField(labelWithString: "")
+    private let heroBox = NSBox()
+    private let statusLine = NSTextField(labelWithString: "")
+    private let footerLine = NSTextField(labelWithString: "")
+
+    private let checkProcess = CheckRow()
+    private let checkNode = CheckRow()
+    private let checkExit = CheckRow()
+    private let checkTun = CheckRow()
+    private let checkFresh = CheckRow()
+
+    private let contentWidth: CGFloat = 504
 
     private func expand(_ path: String) -> String { NSString(string: path).expandingTildeInPath }
     private var configPath: String { expand("~/.config/claudeguard/config.json") }
     private var gateStatePath: String { expand("~/.config/claudeguard/gate/state.json") }
     private var gateNodePath: String { expand("~/.config/claudeguard/gate/node.json") }
+    private var gatePidPath: String { expand("~/.config/claudeguard/gate/gate.pid") }
     private var eventPath: String { expand("~/.config/claudeguard/events.jsonl") }
     private var cliPath: String { expand("~/.local/share/ClaudeGuard/bin/claudeguard") }
 
-    // MARK: layout helpers
+    // MARK: helpers
 
     private func caption(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.textColor = .secondaryLabelColor
         return label
-    }
-
-    private func row(_ key: String, _ value: NSTextField) -> NSStackView {
-        let name = NSTextField(labelWithString: key)
-        name.font = .systemFont(ofSize: 12)
-        name.textColor = .secondaryLabelColor
-        name.alignment = .left
-        name.widthAnchor.constraint(equalToConstant: 66).isActive = true
-        value.font = .systemFont(ofSize: 12)
-        value.lineBreakMode = .byTruncatingTail
-        let stack = NSStackView(views: [name, value])
-        stack.orientation = .horizontal
-        stack.spacing = 10
-        stack.alignment = .firstBaseline
-        return stack
     }
 
     private func button(_ title: String, _ action: Selector, primary: Bool = false) -> NSButton {
@@ -1420,11 +1465,19 @@ final class DashboardWindow: NSObject {
         return button
     }
 
-    private func card(_ title: String, _ rows: [NSView]) -> NSBox {
-        let stack = NSStackView(views: [caption(title)] + rows)
+    private func equalRow(_ views: [NSView]) -> NSStackView {
+        let stack = NSStackView(views: views)
+        stack.orientation = .horizontal
+        stack.distribution = .fillEqually
+        stack.spacing = 10
+        return stack
+    }
+
+    private func card(_ views: [NSView], insets: NSSize = NSSize(width: 14, height: 12)) -> NSBox {
+        let stack = NSStackView(views: views)
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 9
+        stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let box = NSBox()
@@ -1434,7 +1487,7 @@ final class DashboardWindow: NSObject {
         box.fillColor = .controlBackgroundColor
         box.borderColor = .separatorColor
         box.borderWidth = 1
-        box.contentViewMargins = NSSize(width: 14, height: 12)
+        box.contentViewMargins = insets
         if let content = box.contentView {
             content.addSubview(stack)
             NSLayoutConstraint.activate([
@@ -1445,6 +1498,38 @@ final class DashboardWindow: NSObject {
             ])
         }
         return box
+    }
+
+    private func spacer() -> NSView {
+        let view = NSView()
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return view
+    }
+
+    private func gateRunning() -> Bool {
+        guard let text = try? String(contentsOfFile: gatePidPath, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
+
+    private func tunPresent() -> Bool {
+        var addrs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addrs) == 0 else { return false }
+        defer { freeifaddrs(addrs) }
+        var ptr = addrs
+        while let pointer = ptr {
+            let ifa = pointer.pointee
+            if let sa = ifa.ifa_addr, sa.pointee.sa_family == UInt8(AF_INET) {
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    if String(cString: host) == "198.18.0.1" { return true }
+                }
+            }
+            ptr = ifa.ifa_next
+        }
+        return false
     }
 
     // MARK: window
@@ -1461,89 +1546,141 @@ final class DashboardWindow: NSObject {
     }
 
     private func build() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 470, height: 620),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 720),
                               styleMask: [.titled, .closable, .miniaturizable],
                               backing: .buffered, defer: false)
-        window.title = "ClaudeGuard"
+        window.title = "Claude 网络守护"
         window.center()
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
+        window.standardWindowButton(.zoomButton)?.isEnabled = false
 
-        dot.wantsLayer = true
-        dot.layer?.cornerRadius = 6
-        dot.translatesAutoresizingMaskIntoConstraints = false
-        dot.widthAnchor.constraint(equalToConstant: 12).isActive = true
-        dot.heightAnchor.constraint(equalToConstant: 12).isActive = true
-
-        headline.font = .systemFont(ofSize: 20, weight: .bold)
-        subtitle.font = .systemFont(ofSize: 12)
-        subtitle.textColor = .secondaryLabelColor
-        subtitle.lineBreakMode = .byTruncatingTail
-
-        let titleRow = NSStackView(views: [dot, headline])
+        let name = NSTextField(labelWithString: "Claude 网络守护")
+        name.font = .systemFont(ofSize: 17, weight: .semibold)
+        let version = NSTextField(labelWithString: "v1.0")
+        version.font = .systemFont(ofSize: 11)
+        version.textColor = .tertiaryLabelColor
+        let titleRow = NSStackView(views: [name, spacer(), version])
         titleRow.orientation = .horizontal
-        titleRow.spacing = 9
-        titleRow.alignment = .centerY
+        titleRow.alignment = .firstBaseline
 
-        let header = NSStackView(views: [titleRow, subtitle])
-        header.orientation = .vertical
-        header.alignment = .leading
-        header.spacing = 3
+        headline.font = .systemFont(ofSize: 23, weight: .bold)
+        heroSubtitle.font = .systemFont(ofSize: 11.5)
+        heroSubtitle.textColor = .secondaryLabelColor
+        heroSubtitle.maximumNumberOfLines = 2
+        heroSubtitle.preferredMaxLayoutWidth = contentWidth - 32
+        heroSubtitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        heroMode.font = .systemFont(ofSize: 11)
+        heroMode.textColor = .secondaryLabelColor
+        heroMode.alignment = .right
+        heroMode.setContentHuggingPriority(.required, for: .horizontal)
 
-        let gateButtons = NSStackView(views: [
-            button("复检", #selector(onVerify), primary: true),
-            button("启动门卫", #selector(onStart)),
+        let heroTop = NSStackView(views: [headline, spacer(), heroMode])
+        heroTop.orientation = .horizontal
+        heroTop.alignment = .firstBaseline
+        let heroStack = NSStackView(views: [heroTop, heroSubtitle])
+        heroStack.orientation = .vertical
+        heroStack.alignment = .leading
+        heroStack.spacing = 4
+
+        heroBox.boxType = .custom
+        heroBox.titlePosition = .noTitle
+        heroBox.cornerRadius = 12
+        heroBox.borderWidth = 0
+        heroBox.fillColor = .controlBackgroundColor
+        heroBox.contentViewMargins = NSSize(width: 16, height: 14)
+        if let content = heroBox.contentView {
+            heroStack.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(heroStack)
+            NSLayoutConstraint.activate([
+                heroStack.topAnchor.constraint(equalTo: content.topAnchor),
+                heroStack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+                heroStack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                heroStack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            ])
+        }
+
+        let primaryRow = equalRow([
+            button("复检出口", #selector(onVerify), primary: true),
             button("停止门卫", #selector(onStop)),
         ])
-        gateButtons.orientation = .horizontal
-        gateButtons.spacing = 8
-
-        let gateCard = card("门卫 · 固定出口", [
-            row("状态", gateStateValue),
-            row("节点", gateNodeValue),
-            row("固定出口", gateExpectedValue),
-            row("实测出口", gateObservedValue),
-            gateButtons,
+        let secondaryRow = equalRow([
+            button("启动门卫", #selector(onStart)),
+            button("打开日志", #selector(onLog)),
         ])
 
-        let procButtons = NSStackView(views: [
-            button("冻结", #selector(onFreeze)),
-            button("恢复", #selector(onResume)),
-            button("结束全部", #selector(onKill)),
+        statusLine.font = .systemFont(ofSize: 11)
+        statusLine.textColor = .secondaryLabelColor
+        statusLine.lineBreakMode = .byTruncatingTail
+        let statusBox = NSBox()
+        statusBox.boxType = .custom
+        statusBox.titlePosition = .noTitle
+        statusBox.cornerRadius = 8
+        statusBox.borderColor = .separatorColor
+        statusBox.borderWidth = 1
+        statusBox.fillColor = .clear
+        statusBox.contentViewMargins = NSSize(width: 10, height: 8)
+        if let content = statusBox.contentView {
+            statusLine.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(statusLine)
+            NSLayoutConstraint.activate([
+                statusLine.topAnchor.constraint(equalTo: content.topAnchor),
+                statusLine.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+                statusLine.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                statusLine.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            ])
+        }
+
+        let detailsTitle = caption("详情（后台逐层自检）")
+        let killButton = button("结束 Claude 进程", #selector(onKill))
+        killButton.controlSize = .small
+        let detailsHeader = NSStackView(views: [detailsTitle, spacer(), killButton])
+        detailsHeader.orientation = .horizontal
+        detailsHeader.alignment = .centerY
+
+        let copyButton = button("复制诊断", #selector(onCopyDiagnostic))
+        copyButton.controlSize = .small
+        let detailsFooter = NSStackView(views: [spacer(), copyButton])
+        detailsFooter.orientation = .horizontal
+        detailsFooter.alignment = .centerY
+
+        let detailsCard = card([
+            detailsHeader,
+            checkProcess.view,
+            checkNode.view,
+            checkExit.view,
+            checkTun.view,
+            checkFresh.view,
+            detailsFooter,
         ])
-        procButtons.orientation = .horizontal
-        procButtons.spacing = 8
 
-        let procCard = card("Claude 进程", [procValue, procButtons])
+        footerLine.font = .systemFont(ofSize: 10.5)
+        footerLine.textColor = .tertiaryLabelColor
+        let refreshButton = button("刷新", #selector(onRefresh))
+        refreshButton.controlSize = .small
+        let footer = NSStackView(views: [footerLine, spacer(), refreshButton])
+        footer.orientation = .horizontal
+        footer.alignment = .centerY
 
-        eventsText.isEditable = false
-        eventsText.isSelectable = true
-        eventsText.drawsBackground = false
-        eventsText.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        eventsText.textColor = .secondaryLabelColor
-        eventsText.textContainerInset = NSSize(width: 0, height: 2)
+        let note = NSTextField(labelWithString: "状态只读 · 管理员动作需授权 · 不自动切换 TUN / 系统代理")
+        note.font = .systemFont(ofSize: 10)
+        note.textColor = .tertiaryLabelColor
 
-        let scroll = NSScrollView()
-        scroll.documentView = eventsText
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        scroll.borderType = .noBorder
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.heightAnchor.constraint(equalToConstant: 118).isActive = true
-        scroll.widthAnchor.constraint(equalToConstant: 400).isActive = true
-
-        let eventsCard = card("最近事件", [scroll])
-
-        messageLabel.font = .systemFont(ofSize: 11)
-        messageLabel.textColor = .tertiaryLabelColor
-        messageLabel.lineBreakMode = .byTruncatingTail
-
-        let root = NSStackView(views: [header, gateCard, procCard, eventsCard, messageLabel])
+        let root = NSStackView(views: [
+            titleRow, heroBox, primaryRow, secondaryRow, statusBox, detailsCard, footer, note,
+        ])
         root.orientation = .vertical
         root.alignment = .leading
-        root.spacing = 14
+        root.spacing = 12
         root.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         root.translatesAutoresizingMaskIntoConstraints = false
+        root.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
+
+        for item in [heroBox, primaryRow, secondaryRow, statusBox, detailsCard, footer] {
+            item.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
+        }
+        titleRow.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
+        note.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
 
         let background = NSVisualEffectView()
         background.material = .underWindowBackground
@@ -1553,10 +1690,10 @@ final class DashboardWindow: NSObject {
         NSLayoutConstraint.activate([
             root.topAnchor.constraint(equalTo: background.topAnchor),
             root.leadingAnchor.constraint(equalTo: background.leadingAnchor),
-            root.trailingAnchor.constraint(equalTo: background.trailingAnchor),
             root.bottomAnchor.constraint(equalTo: background.bottomAnchor),
         ])
         window.contentView = background
+        window.setContentSize(NSSize(width: 540, height: 720))
         self.window = window
     }
 
@@ -1577,63 +1714,92 @@ final class DashboardWindow: NSObject {
         let gateOn = (config["gate_enabled"] as? Bool) ?? false
         let rawState = (gate["state"] as? String) ?? "STOPPED"
         let updated = (gate["updated_at"] as? Double) ?? 0
-        let fresh = Date().timeIntervalSince1970 - updated <= 45
+        let age = max(0, Date().timeIntervalSince1970 - updated)
+        let fresh = age <= 45
         let state = fresh ? rawState : "STOPPED"
+        let running = gateRunning()
+        let tun = tunPresent()
 
-        let dotColor: NSColor
-        let title: String
-        switch state {
-        case "READY":  dotColor = .systemGreen;  title = gateOn ? "固定出口已验证" : "出口已通过检查"
-        case "BLOCKED": dotColor = .systemRed;   title = "已拦截"
-        case "STARTING": dotColor = .systemYellow; title = "正在验证"
-        default:       dotColor = .systemGray;   title = "门卫未运行"
-        }
-        dot.layer?.backgroundColor = dotColor.cgColor
-        headline.stringValue = title
-
-        let reason = (gate["reason"] as? String) ?? ""
         let expected = (gate["expected_ip"] as? String) ?? ""
         let observed = (gate["observed_ip"] as? String) ?? ""
-        if !gateOn {
-            subtitle.stringValue = "判定来源：IP 白名单"
-        } else if !fresh {
-            subtitle.stringValue = "门卫状态未发布或已过期"
-        } else {
-            subtitle.stringValue = reason.isEmpty ? "判定来源：门卫" : reason
-        }
-
-        gateStateValue.stringValue = fresh ? rawState : "\(rawState)（过期）"
+        let reason = (gate["reason"] as? String) ?? ""
         let name = (node["name"] as? String) ?? "未固定节点"
-        let server = (node["server"] as? String) ?? "-"
+        let server = (node["server"] as? String) ?? ""
         let port = (node["port"] as? Int) ?? 0
-        gateNodeValue.stringValue = "\(name)  \(server):\(port)"
-        gateExpectedValue.stringValue = expected.isEmpty ? "未设置" : expected
-        gateObservedValue.stringValue = observed.isEmpty ? "未验证" : observed
 
-        let count = ClaudeControl.pids().count
-        procValue.stringValue = count == 0 ? "未检测到运行中的 Claude" : "检测到 \(count) 个 Claude 进程"
-
-        eventsText.string = recentEvents()
-    }
-
-    private func recentEvents() -> String {
-        guard let text = try? String(contentsOfFile: eventPath, encoding: .utf8) else { return "（无）" }
-        var lines: [String] = []
-        for line in text.split(separator: "\n").suffix(6) {
-            guard let data = line.data(using: .utf8),
-                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
-            let stamp = String(((object["time"] as? String) ?? "").dropFirst(11).prefix(8))
-            let event = (object["event"] as? String) ?? ""
-            let state = (object["state"] as? String) ?? ""
-            lines.append("\(stamp)  \(event) \(state)")
+        let color: NSColor
+        let title: String
+        switch state {
+        case "READY":
+            color = .systemGreen
+            title = gateOn ? "Claude 已锁定" : "出口已通过检查"
+        case "BLOCKED":
+            color = .systemRed
+            title = "Claude 已拦截"
+        case "STARTING":
+            color = .systemYellow
+            title = "正在验证"
+        default:
+            color = .secondaryLabelColor
+            title = gateOn ? "门卫未运行" : "IP 白名单模式"
         }
-        return lines.isEmpty ? "（无）" : lines.joined(separator: "\n")
+        headline.stringValue = title
+        headline.textColor = color
+        heroBox.fillColor = color.withAlphaComponent(0.08)
+
+        if !gateOn {
+            let allowed = (config["allowed_ips"] as? [String])?.count ?? 0
+            heroMode.stringValue = "当前：IP 白名单"
+            heroSubtitle.stringValue = allowed == 0
+                ? "白名单为空，Claude 启动会被拦截"
+                : "白名单 \(allowed) 个出口"
+        } else if fresh {
+            heroMode.stringValue = "当前：门卫保护"
+            let stamp = observed.isEmpty ? "尚未验证" : observed
+            heroSubtitle.stringValue = "固定出口 \(expected.isEmpty ? "未设置" : expected) · 实测 \(stamp)"
+        } else {
+            heroMode.stringValue = "当前：门卫保护"
+            heroSubtitle.stringValue = "门卫状态未发布或已过期，Claude 保持拦截"
+        }
+        if state == "READY" && !expected.isEmpty {
+            heroSubtitle.stringValue = "固定出口 \(expected) · 最后验证 \(Int(age)) 秒前"
+        }
+        if state == "BLOCKED" && !reason.isEmpty {
+            heroSubtitle.stringValue = reason
+        }
+
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        statusLine.stringValue = "已重新读取状态文件（不等于执行自检），读取时间 \(stamp)"
+
+        checkProcess.set(title: "门卫进程",
+                         detail: running ? "mihomo 运行中 · \(state)" : "mihomo 未运行",
+                         status: !gateOn ? "未启用" : (running ? "正常" : "异常"),
+                         ok: running, enabled: gateOn)
+        checkNode.set(title: "固定节点",
+                      detail: server.isEmpty ? "未固定节点" : "\(name)  \(server):\(port)",
+                      status: !gateOn ? "未启用" : (server.isEmpty ? "异常" : "正常"),
+                      ok: !server.isEmpty, enabled: gateOn)
+        let exitOK = !expected.isEmpty && observed.contains(expected)
+        checkExit.set(title: "出口一致性",
+                      detail: expected.isEmpty ? "未设置固定出口" : "期望 \(expected) · 实测 \(observed.isEmpty ? "未验证" : observed)",
+                      status: !gateOn ? "未启用" : (exitOK ? "正常" : "异常"),
+                      ok: exitOK, enabled: gateOn)
+        checkTun.set(title: "TUN 捕获",
+                     detail: tun ? "198.18.0.1 · 全机流量进入门卫" : "未检测到 TUN 接口",
+                     status: !gateOn ? "未启用" : (tun ? "正常" : "异常"),
+                     ok: tun, enabled: gateOn)
+        checkFresh.set(title: "验证时效",
+                       detail: updated == 0 ? "尚未验证" : "\(Int(age)) 秒前 · 上限 45 秒",
+                       status: !gateOn ? "未启用" : (fresh ? "正常" : "异常"),
+                       ok: fresh, enabled: gateOn)
+
+        footerLine.stringValue = "后台复检 \(stamp) · 每 30 秒重新读取状态"
     }
 
     // MARK: actions
 
     private func run(_ arguments: [String]) {
-        messageLabel.stringValue = "执行中…"
+        statusLine.stringValue = "执行中…"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliPath)
         process.arguments = arguments
@@ -1643,7 +1809,7 @@ final class DashboardWindow: NSObject {
         do {
             try process.run()
         } catch {
-            messageLabel.stringValue = "无法执行：\(error.localizedDescription)"
+            statusLine.stringValue = "无法执行：\(error.localizedDescription)"
             return
         }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1652,7 +1818,7 @@ final class DashboardWindow: NSObject {
             let text = String(data: data, encoding: .utf8) ?? ""
             let last = text.split(separator: "\n").last.map(String.init) ?? ""
             DispatchQueue.main.async {
-                self?.messageLabel.stringValue = last.isEmpty ? "完成" : last
+                self?.statusLine.stringValue = last.isEmpty ? "完成" : last
                 self?.refresh()
             }
         }
@@ -1661,22 +1827,47 @@ final class DashboardWindow: NSObject {
     @objc private func onVerify() { run(["gate", "verify"]) }
     @objc private func onStart() { run(["gate", "start"]) }
     @objc private func onStop() { run(["gate", "stop"]) }
+    @objc private func onRefresh() { refresh() }
+
+    @objc private func onLog() {
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: eventPath)])
+        statusLine.stringValue = "已在访达中显示事件日志：\(eventPath)"
+    }
+
+    @objc private func onCopyDiagnostic() {
+        let gate = readJSON(gateStatePath) ?? [:]
+        let node = readJSON(gateNodePath) ?? [:]
+        let report = """
+        ClaudeGuard 诊断
+        时间：\(Date())
+        门卫状态：\(gate["state"] ?? "-")
+        原因：\(gate["reason"] ?? "-")
+        固定出口：\(gate["expected_ip"] ?? "-")
+        实测出口：\(gate["observed_ip"] ?? "-")
+        节点：\(node["name"] ?? "-") \(node["server"] ?? "-"):\(node["port"] ?? "-")
+        TUN：\(tunPresent() ? "存在" : "不存在")
+        """
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(report, forType: .string)
+        statusLine.stringValue = "诊断信息已复制到剪贴板"
+    }
 
     @objc private func onFreeze() {
         let count = ClaudeControl.freeze()
-        messageLabel.stringValue = count == 0 ? "没有可冻结的 Claude 进程" : "已冻结 \(count) 个进程"
+        statusLine.stringValue = count == 0 ? "没有可冻结的 Claude 进程" : "已冻结 \(count) 个进程"
         refresh()
     }
 
     @objc private func onResume() {
         let count = ClaudeControl.resume()
-        messageLabel.stringValue = count == 0 ? "没有可恢复的 Claude 进程" : "已恢复 \(count) 个进程"
+        statusLine.stringValue = count == 0 ? "没有可恢复的 Claude 进程" : "已恢复 \(count) 个进程"
         refresh()
     }
 
     @objc private func onKill() {
         let count = ClaudeControl.terminateAll()
-        messageLabel.stringValue = count == 0 ? "没有需要结束的 Claude 进程" : "已结束 \(count) 个进程"
+        statusLine.stringValue = count == 0 ? "没有需要结束的 Claude 进程" : "已结束 \(count) 个进程"
         refresh()
     }
 }
