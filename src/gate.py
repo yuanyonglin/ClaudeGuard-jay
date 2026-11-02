@@ -489,6 +489,11 @@ class Gate:
         try:
             os.kill(pid, 0)
             return True
+        except PermissionError:
+            # TUN mode runs mihomo as root, so a normal user gets EPERM from
+            # signal 0. That means "alive but not ours to signal", not "gone";
+            # treating it as dead would make watch spawn a second mihomo.
+            return True
         except OSError:
             return False
 
@@ -547,6 +552,12 @@ class Gate:
         if pid:
             try:
                 os.kill(pid, 15)
+            except PermissionError:
+                # TUN mode runs mihomo as root. Do not unlink the pid file or
+                # claim STOPPED: the process is still there and still capturing.
+                self.state = "BLOCKED"
+                self.reason = "门卫以 root 运行，停止它需要 sudo：sudo claudeguard gate stop"
+                return self.publish()
             except OSError:
                 pass
             deadline = time.time() + timeout
@@ -561,6 +572,15 @@ class Gate:
                     os.kill(pid, 9)
                 except OSError:
                     pass
+                time.sleep(0.2)
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    pass
+                else:
+                    self.state = "BLOCKED"
+                    self.reason = "门卫进程仍在运行，无法停止"
+                    return self.publish()
         try:
             self.pid_path.unlink()
         except OSError:
