@@ -77,7 +77,9 @@ def main():
 
     # Restore the terminal BEFORE printing: force_restore_terminal() flips the
     # screen buffer, so printing first would wipe the message we just wrote.
-    if not config.allowed_ips and config.config.get("access_mode", "whitelist") == "whitelist":
+    if (not config.gate_enabled
+            and not config.allowed_ips
+            and config.config.get("access_mode", "whitelist") == "whitelist"):
         force_restore_terminal()
         print("\033[91m[ClaudeGuard] 🚫 尚未设置 IP 白名单，已阻止启动。\033[0m", file=sys.stderr)
         print("请运行 claudeguard add-ip <出口IP> 添加允许使用的出口。", file=sys.stderr)
