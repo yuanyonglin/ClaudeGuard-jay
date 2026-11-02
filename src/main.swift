@@ -1300,14 +1300,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func onQuit() { NSApplication.shared.terminate(nil) }
 }
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
-
-
-
 // MARK: - Claude process control
 
 /// Freeze / resume / terminate Claude without pretending to be a debugger.
@@ -1368,8 +1360,6 @@ enum ClaudeControl {
         return list.count
     }
 }
-
-
 
 // MARK: - Dashboard window
 
@@ -1690,3 +1680,10 @@ final class DashboardWindow: NSObject {
         refresh()
     }
 }
+
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+let delegate = AppDelegate()
+app.delegate = delegate
+app.run()
+
