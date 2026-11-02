@@ -50,6 +50,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var eventLogPath = NSString(string: "~/.config/claudeguard/events.jsonl").expandingTildeInPath
     private let eventLogLock = NSLock()
 
+    /// A blocked verdict is easy to miss when it only recolours a menu bar
+    /// icon, so surface it as a system notification as well.
+    private func notifyUser(_ title: String, _ body: String) {
+        let safeBody = body.replacingOccurrences(of: "\"", with: "\\\"")
+        let safeTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", "display notification \"\(safeBody)\" with title \"\(safeTitle)\""]
+        try? process.run()
+    }
+
     func logEvent(_ event: String, fields: [String: Any] = [:]) {
         eventLogLock.lock()
         defer { eventLogLock.unlock() }
@@ -415,6 +426,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if previous != newState || previousReason != policyReason {
             logEvent("verdict_changed", fields: ["state": statusText(), "mode": checkedMode,
                      "detected_ips": detectedIPs, "reason": policyReason, "jump_latched": jumpBlocked])
+        }
+        // Tell the user when the gate stops proving the exit. Without this the
+        // verdict only changes the colour of a menu bar icon nobody is watching.
+        if case .blocked = newState {
+            var wasBlocked = false
+            if case .blocked = previous { wasBlocked = true }
+            if !wasBlocked {
+                notifyUser("ClaudeGuard 已拦截", policyReason.isEmpty ? "出口未通过检查" : policyReason)
+            }
         }
         verdictIPCheckMode = checkedMode
         verdictAllowedIPs = checkedIPs
@@ -1440,6 +1460,7 @@ final class DashboardWindow: NSObject {
     private let heroBox = NSBox()
     private let statusLine = NSTextField(labelWithString: "")
     private let footerLine = NSTextField(labelWithString: "")
+    private let autostartCheck = NSButton(checkboxWithTitle: "登录时自启", target: nil, action: nil)
 
     private let checkProcess = CheckRow()
     private let checkNode = CheckRow()
@@ -1456,6 +1477,7 @@ final class DashboardWindow: NSObject {
     private var gatePidPath: String { expand("~/.config/claudeguard/gate/gate.pid") }
     private var eventPath: String { expand("~/.config/claudeguard/events.jsonl") }
     private var cliPath: String { expand("~/.local/share/ClaudeGuard/bin/claudeguard") }
+    private var launchAgentPath: String { expand("~/Library/LaunchAgents/com.claudeguard.daemon.plist") }
 
     // MARK: helpers
 
@@ -1622,6 +1644,15 @@ final class DashboardWindow: NSObject {
             button("打开日志", #selector(onLog)),
         ])
 
+        autostartCheck.title = "登录时自启"
+        autostartCheck.font = .systemFont(ofSize: 11)
+        autostartCheck.target = self
+        autostartCheck.action = #selector(onToggleAutostart)
+        autostartCheck.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let autostartRow = NSStackView(views: [autostartCheck, spacer()])
+        autostartRow.orientation = .horizontal
+        autostartRow.alignment = .centerY
+
         statusLine.font = .systemFont(ofSize: 11)
         statusLine.textColor = .secondaryLabelColor
         statusLine.lineBreakMode = .byTruncatingTail
@@ -1680,7 +1711,7 @@ final class DashboardWindow: NSObject {
         note.textColor = .tertiaryLabelColor
 
         let root = NSStackView(views: [
-            titleRow, heroBox, primaryRow, secondaryRow, statusBox, detailsCard, footer, note,
+            titleRow, heroBox, primaryRow, secondaryRow, autostartRow, statusBox, detailsCard, footer, note,
         ])
         root.orientation = .vertical
         root.alignment = .leading
@@ -1688,7 +1719,7 @@ final class DashboardWindow: NSObject {
         root.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         root.translatesAutoresizingMaskIntoConstraints = false
 
-        for item in [heroBox, primaryRow, secondaryRow, statusBox, detailsCard, footer] {
+        for item in [heroBox, primaryRow, secondaryRow, autostartRow, statusBox, detailsCard, footer] {
             item.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
         }
         titleRow.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
@@ -1803,6 +1834,8 @@ final class DashboardWindow: NSObject {
                      detail: !tunEnabled ? "代理模式：仅覆盖使用门卫端口的程序" : (tun ? "198.18.0.1 · 全机流量进入门卫" : "未检测到 TUN 接口"),
                      status: !gateOn || !tunEnabled ? "未启用" : (tun ? "正常" : "异常"),
                      ok: tun, enabled: gateOn && tunEnabled)
+        autostartCheck.state = FileManager.default.fileExists(atPath: launchAgentPath) ? .on : .off
+
         checkFresh.set(title: "验证时效",
                        detail: updated == 0 ? "尚未验证" : "\(Int(age)) 秒前 · 上限 45 秒",
                        status: !gateOn ? "未启用" : (fresh ? "正常" : "异常"),
@@ -1843,6 +1876,40 @@ final class DashboardWindow: NSObject {
     @objc private func onStart() { run(["gate", "start"]) }
     @objc private func onStop() { run(["gate", "stop"]) }
     @objc private func onRefresh() { refresh() }
+
+    @objc private func onToggleAutostart() {
+        let on = autostartCheck.state == .on
+        let manager = FileManager.default
+        if on {
+            let binary = Bundle.main.bundlePath + "/Contents/MacOS/ClaudeGuardMenuBar"
+            let plist = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key><string>com.claudeguard.daemon</string>
+                <key>ProgramArguments</key>
+                <array><string>\(binary)</string></array>
+                <key>RunAtLoad</key><true/>
+                <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+                <key>StandardOutPath</key><string>/tmp/claudeguard.log</string>
+                <key>StandardErrorPath</key><string>/tmp/claudeguard.err</string>
+            </dict>
+            </plist>
+            """
+            do {
+                try manager.createDirectory(atPath: expand("~/Library/LaunchAgents"), withIntermediateDirectories: true)
+                try plist.write(toFile: launchAgentPath, atomically: true, encoding: .utf8)
+                statusLine.stringValue = "已开启登录自启（下次登录生效）"
+            } catch {
+                autostartCheck.state = .off
+                statusLine.stringValue = "开启失败：\(error.localizedDescription)"
+            }
+        } else {
+            try? manager.removeItem(atPath: launchAgentPath)
+            statusLine.stringValue = "已关闭登录自启（本次运行不受影响）"
+        }
+    }
 
     @objc private func onLog() {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: eventPath)])
