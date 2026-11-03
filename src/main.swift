@@ -1467,6 +1467,7 @@ final class DashboardWindow: NSObject {
     private let checkExit = CheckRow()
     private let checkTun = CheckRow()
     private let checkFresh = CheckRow()
+    private let checkWatchdog = CheckRow()
 
     private let contentWidth: CGFloat = 504
 
@@ -1476,6 +1477,7 @@ final class DashboardWindow: NSObject {
     private var gateNodePath: String { expand("~/.config/claudeguard/gate/node.json") }
     private var gatePidPath: String { expand("~/.config/claudeguard/gate/gate.pid") }
     private var eventPath: String { expand("~/.config/claudeguard/events.jsonl") }
+    private var watchdogPath: String { expand("~/.config/claudeguard/watchdog.json") }
     private var cliPath: String { expand("~/.local/share/ClaudeGuard/bin/claudeguard") }
     private var launchAgentPath: String { expand("~/Library/LaunchAgents/com.claudeguard.daemon.plist") }
 
@@ -1695,6 +1697,7 @@ final class DashboardWindow: NSObject {
             checkExit.view,
             checkTun.view,
             checkFresh.view,
+            checkWatchdog.view,
             detailsFooter,
         ])
 
@@ -1834,6 +1837,15 @@ final class DashboardWindow: NSObject {
                      detail: !tunEnabled ? "代理模式：仅覆盖使用门卫端口的程序" : (tun ? "198.18.0.1 · 全机流量进入门卫" : "未检测到 TUN 接口"),
                      status: !gateOn || !tunEnabled ? "未启用" : (tun ? "正常" : "异常"),
                      ok: tun, enabled: gateOn && tunEnabled)
+        let watchdog = readJSON(watchdogPath) ?? [:]
+        let watchdogOK = (watchdog["status"] as? String) == "ok"
+        let watchdogAge = (watchdog["checked_at"] as? Double).map { Date().timeIntervalSince1970 - $0 } ?? 999
+        checkWatchdog.set(title: "心跳看门狗",
+                          detail: watchdogOK ? "每 10 秒检查守护与门卫" : "看门狗报告异常",
+                          status: watchdogAge > 30 ? "失联" : (watchdogOK ? "正常" : "异常"),
+                          ok: watchdogOK && watchdogAge <= 30,
+                          enabled: watchdogAge <= 30)
+
         autostartCheck.state = FileManager.default.fileExists(atPath: launchAgentPath) ? .on : .off
 
         checkFresh.set(title: "验证时效",
