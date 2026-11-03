@@ -632,19 +632,29 @@ class Gate:
         observed = {}
         errors = {}
         for label, url in PROBE_URLS:
-            try:
-                body = self._fetch(url, timeout)
-                if label == "cloudflare":
-                    value = ""
-                    for line in body.splitlines():
-                        if line.startswith("ip="):
-                            value = line[3:].strip()
-                            break
-                else:
-                    value = body.splitlines()[0].strip() if body else ""
-                observed[label] = value
-            except Exception as exc:  # a failed provider never becomes a pass
-                errors[label] = f"{type(exc).__name__}: {exc}"
+            last = None
+            # One retry: a single reset/EOF from a provider is not a verdict.
+            # Without this a transient TLS failure closed Claude's desktop.
+            for attempt in range(2):
+                try:
+                    body = self._fetch(url, timeout)
+                    if label == "cloudflare":
+                        value = ""
+                        for line in body.splitlines():
+                            if line.startswith("ip="):
+                                value = line[3:].strip()
+                                break
+                    else:
+                        value = body.splitlines()[0].strip() if body else ""
+                    observed[label] = value
+                    last = None
+                    break
+                except Exception as exc:  # a failed provider never becomes a pass
+                    last = f"{type(exc).__name__}: {exc}"
+                    if attempt == 0:
+                        time.sleep(0.5)
+            if last:
+                errors[label] = last
         return observed, errors
 
     def verify(self):
@@ -675,16 +685,24 @@ class Gate:
             self.state = "BLOCKED"
             self.reason = f"出口与预期不符（期望 {expected}）：{', '.join(mismatch)}"
             return self.publish()
-        if missing:
+
+        # A provider that times out is a degraded check, not evidence of a leak:
+        # the reachable provider still has to show the expected exit, and any
+        # mismatch above is fatal. Requiring both providers made a single TLS
+        # handshake timeout close Claude's desktop, which is worse than a
+        # briefly-degraded cross-check.
+        confirmed = [k for k, v in observed.items() if v == expected]
+        if not confirmed:
             self.set_gate(REJECT)
             self.state = "BLOCKED"
-            detail = "; ".join(f"{k}: {errors.get(k, '无结果')}" for k in missing)
+            detail = "; ".join(f"{k}: {errors.get(k, '无结果')}" for k in missing) or "没有来源返回结果"
             self.reason = f"无法确认出口 IP：{detail}"
             return self.publish()
 
         self.set_gate(PINNED)
         self.state = "READY"
-        self.reason = f"固定出口已验证：{expected}"
+        suffix = f"（{'、'.join(missing)} 未响应，已跳过）" if missing else ""
+        self.reason = f"固定出口已验证：{expected}{suffix}"
         self.last_verified = time.time()
         return self.publish()
 

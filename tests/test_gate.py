@@ -237,11 +237,14 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(self.switched[-1], gate.REJECT)
         self.assertIn("203.0.113.99", status["reason"])
 
-    def test_missing_provider_blocks_even_when_the_other_matches(self):
+    def test_missing_provider_is_degraded_when_the_other_matches(self):
+        # A single provider timing out must not close Claude: the reachable
+        # provider still proves the expected exit, and a mismatch is fatal.
         self.probe(http="198.51.100.7")
         status = self.gate.verify()
-        self.assertEqual(status["state"], "BLOCKED")
-        self.assertEqual(self.switched[-1], gate.REJECT)
+        self.assertEqual(status["state"], "READY")
+        self.assertIn("cloudflare", status["reason"])
+        self.assertEqual(self.switched[-1], gate.PINNED)
 
     def test_empty_answer_blocks(self):
         self.probe(http="", cloudflare="")
