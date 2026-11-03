@@ -112,8 +112,13 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(group["name"], gate.GATE_GROUP)
         self.assertEqual(group["proxies"], [gate.PINNED, gate.REJECT])
 
-    def test_claude_proxy_port_always_uses_the_gate(self):
-        self.assertEqual(self.config["rules"][0], "IN-PORT,27899,GATE")
+    def test_telemetry_is_rejected_before_the_proxy_port(self):
+        rules = self.config["rules"]
+        in_port = rules.index("IN-PORT,27899,GATE")
+        for domain in gate.TELEMETRY_DOMAINS:
+            rule = f"DOMAIN-SUFFIX,{domain},REJECT"
+            self.assertIn(rule, rules)
+            self.assertLess(rules.index(rule), in_port)
 
     def test_anthropic_domains_use_the_gate_and_the_rest_use_main(self):
         rules = self.config["rules"]

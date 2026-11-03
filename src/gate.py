@@ -57,6 +57,14 @@ CLAUDE_DOMAINS = (
     "anthropic.ai",
 )
 
+# Telemetry endpoints the desktop app would otherwise tunnel through the goal:
+# they carry no product traffic, so reject them before the proxy in-port rule.
+TELEMETRY_DOMAINS = (
+    "datadoghq.com",
+    "browser-intake-datadoghq.com",
+    "sentry.io",
+)
+
 PROBE_URLS = (
     ("http", "https://api.ipify.org/"),
     ("cloudflare", "https://www.cloudflare.com/cdn-cgi/trace"),
@@ -344,7 +352,8 @@ def render_config(node, options, token):
     # Claude's explicit proxy port always goes through the gate, whatever the
     # destination. The transparent port routes only Anthropic domains through
     # the gate; everything else keeps the user's normal upstream.
-    rules = [f"IN-PORT,{options['proxy_port']},{GATE_GROUP}"]
+    rules = [f"DOMAIN-SUFFIX,{domain},REJECT" for domain in TELEMETRY_DOMAINS]
+    rules.append(f"IN-PORT,{options['proxy_port']},{GATE_GROUP}")
     rules += [f"DOMAIN-SUFFIX,{domain},{GATE_GROUP}" for domain in CLAUDE_DOMAINS]
     rules.append(f"MATCH,{MAIN_GROUP}")
 
