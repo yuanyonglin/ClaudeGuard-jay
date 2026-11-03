@@ -1468,6 +1468,7 @@ final class DashboardWindow: NSObject {
     private let checkTun = CheckRow()
     private let checkFresh = CheckRow()
     private let checkWatchdog = CheckRow()
+    private let checkBypass = CheckRow()
 
     private let contentWidth: CGFloat = 504
 
@@ -1478,6 +1479,7 @@ final class DashboardWindow: NSObject {
     private var gatePidPath: String { expand("~/.config/claudeguard/gate/gate.pid") }
     private var eventPath: String { expand("~/.config/claudeguard/events.jsonl") }
     private var watchdogPath: String { expand("~/.config/claudeguard/watchdog.json") }
+    private var bypassPath: String { expand("~/.config/claudeguard/bypass.json") }
     private var cliPath: String { expand("~/.local/share/ClaudeGuard/bin/claudeguard") }
     private var launchAgentPath: String { expand("~/Library/LaunchAgents/com.claudeguard.daemon.plist") }
 
@@ -1698,6 +1700,7 @@ final class DashboardWindow: NSObject {
             checkTun.view,
             checkFresh.view,
             checkWatchdog.view,
+            checkBypass.view,
             detailsFooter,
         ])
 
@@ -1845,6 +1848,22 @@ final class DashboardWindow: NSObject {
                           status: watchdogAge > 30 ? "失联" : (watchdogOK ? "正常" : "异常"),
                           ok: watchdogOK && watchdogAge <= 30,
                           enabled: watchdogAge <= 30)
+
+        let bypass = readJSON(bypassPath) ?? [:]
+        let bypassAge = (bypass["checked_at"] as? Double).map { Date().timeIntervalSince1970 - $0 } ?? 999
+        let frozen = (bypass["frozen"] as? [[String: Any]]) ?? []
+        if let first = frozen.first {
+            let pid = (first["pid"] as? Int) ?? 0
+            let peer = (first["peer"] as? String) ?? "-"
+            checkBypass.set(title: "代理绕过检测",
+                            detail: "已冻结 PID \(pid) · 目标 \(peer)",
+                            status: "异常", ok: false)
+        } else {
+            checkBypass.set(title: "代理绕过检测",
+                            detail: bypassAge > 10 ? "检测进程未运行" : "每 2 秒扫描 Claude 的非回环连接",
+                            status: bypassAge > 10 ? "失联" : "正常",
+                            ok: bypassAge <= 10, enabled: bypassAge <= 10)
+        }
 
         autostartCheck.state = FileManager.default.fileExists(atPath: launchAgentPath) ? .on : .off
 
