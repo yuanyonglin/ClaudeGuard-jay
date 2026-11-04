@@ -1461,6 +1461,7 @@ final class DashboardWindow: NSObject {
     private let statusLine = NSTextField(labelWithString: "")
     private let footerLine = NSTextField(labelWithString: "")
     private let autostartCheck = NSButton(checkboxWithTitle: "登录时自启", target: nil, action: nil)
+    private let tunCheck = NSButton(checkboxWithTitle: "TUN 模式（全机捕获）", target: nil, action: nil)
 
     private let checkProcess = CheckRow()
     private let checkNode = CheckRow()
@@ -1653,7 +1654,10 @@ final class DashboardWindow: NSObject {
         autostartCheck.target = self
         autostartCheck.action = #selector(onToggleAutostart)
         autostartCheck.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let autostartRow = NSStackView(views: [autostartCheck, spacer()])
+        tunCheck.font = .systemFont(ofSize: 11)
+        tunCheck.target = self
+        tunCheck.action = #selector(onToggleTun)
+        let autostartRow = NSStackView(views: [autostartCheck, tunCheck, spacer()])
         autostartRow.orientation = .horizontal
         autostartRow.alignment = .centerY
 
@@ -1770,6 +1774,8 @@ final class DashboardWindow: NSObject {
         let state = fresh ? rawState : "STOPPED"
         let running = gateRunning()
         let tun = tunPresent()
+        let tunEnabled = (config["gate_tun_enabled"] as? Bool) ?? true
+        tunCheck.state = tunEnabled ? .on : .off
 
         let expected = (gate["expected_ip"] as? String) ?? ""
         let observed = (gate["observed_ip"] as? String) ?? ""
@@ -1813,7 +1819,10 @@ final class DashboardWindow: NSObject {
             heroSubtitle.stringValue = "门卫状态未发布或已过期，Claude 保持拦截"
         }
         if state == "READY" && !expected.isEmpty {
-            heroSubtitle.stringValue = "固定出口 \(expected) · 最后验证 \(Int(age)) 秒前"
+            let tunText: String
+            if tunEnabled { tunText = tun ? "TUN 已接管" : "TUN 未生效（重启门卫）" }
+            else { tunText = "代理模式（TUN 未启用）" }
+            heroSubtitle.stringValue = "固定出口 \(expected) · \(tunText) · \(Int(age)) 秒前"
         }
         if state == "BLOCKED" && !reason.isEmpty {
             heroSubtitle.stringValue = reason
@@ -1835,7 +1844,6 @@ final class DashboardWindow: NSObject {
                       detail: expected.isEmpty ? "未设置固定出口" : "期望 \(expected) · 实测 \(observed.isEmpty ? "未验证" : observed)",
                       status: !gateOn ? "未启用" : (exitOK ? "正常" : "异常"),
                       ok: exitOK, enabled: gateOn)
-        let tunEnabled = (config["gate_tun_enabled"] as? Bool) ?? true
         checkTun.set(title: "TUN 捕获",
                      detail: !tunEnabled ? "代理模式：仅覆盖使用门卫端口的程序" : (tun ? "198.18.0.1 · 全机流量进入门卫" : "未检测到 TUN 接口"),
                      status: !gateOn || !tunEnabled ? "未启用" : (tun ? "正常" : "异常"),
@@ -1907,6 +1915,41 @@ final class DashboardWindow: NSObject {
     @objc private func onStart() { run(["gate", "start"]) }
     @objc private func onStop() { run(["gate", "stop"]) }
     @objc private func onRefresh() { refresh() }
+
+    @objc private func onToggleTun() {
+        let on = tunCheck.state == .on
+        writeTunSetting(on)
+        statusLine.stringValue = on ? "正在启用 TUN（需要管理员授权）…" : "正在关闭 TUN（需要管理员授权）…"
+        // Restarting the root LaunchDaemon is the only way the new mode takes
+        // effect; that needs one administrator prompt, which macOS shows itself.
+        let command = "launchctl kickstart -k system/com.claudeguard.gate"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", "do shell script \"\(command)\" with administrator privileges"]
+            try? process.run()
+            process.waitUntilExit()
+            let ok = process.terminationStatus == 0
+            DispatchQueue.main.async {
+                if ok {
+                    self?.statusLine.stringValue = on ? "已启用 TUN，等待复检…" : "已关闭 TUN，等待复检…"
+                } else {
+                    self?.writeTunSetting(!on)
+                    self?.statusLine.stringValue = "已取消（需要管理员授权才能切换 TUN）"
+                }
+                self?.refresh()
+            }
+        }
+    }
+
+    private func writeTunSetting(_ on: Bool) {
+        var config = readJSON(configPath) ?? [:]
+        config["gate_tun_enabled"] = on
+        if let data = try? JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: URL(fileURLWithPath: configPath), options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configPath)
+        }
+    }
 
     @objc private func onToggleAutostart() {
         let on = autostartCheck.state == .on
