@@ -68,6 +68,8 @@ TELEMETRY_DOMAINS = (
 PROBE_URLS = (
     ("http", "https://api.ipify.org/"),
     ("cloudflare", "https://www.cloudflare.com/cdn-cgi/trace"),
+    # Third witness: a single provider outage must not look like a lost exit.
+    ("ifconfig", "https://ifconfig.me/ip"),
 )
 
 PINNED = "PINNED"
