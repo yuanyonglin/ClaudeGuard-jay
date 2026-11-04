@@ -1462,6 +1462,7 @@ final class DashboardWindow: NSObject {
     private let footerLine = NSTextField(labelWithString: "")
     private let autostartCheck = NSButton(checkboxWithTitle: "登录时自启", target: nil, action: nil)
     private let tunCheck = NSButton(checkboxWithTitle: "TUN 模式（全机捕获）", target: nil, action: nil)
+    private weak var startButton: NSButton?
 
     private let checkProcess = CheckRow()
     private let checkNode = CheckRow()
@@ -1644,8 +1645,10 @@ final class DashboardWindow: NSObject {
             verifyButton,
             button("停止门卫", #selector(onStop)),
         ])
+        let startButton = button("启动门卫", #selector(onStart))
+        self.startButton = startButton
         let secondaryRow = equalRow([
-            button("启动门卫", #selector(onStart)),
+            startButton,
             button("打开日志", #selector(onLog)),
         ])
 
@@ -1776,6 +1779,7 @@ final class DashboardWindow: NSObject {
         let tun = tunPresent()
         let tunEnabled = (config["gate_tun_enabled"] as? Bool) ?? true
         tunCheck.state = tunEnabled ? .on : .off
+        startButton?.title = running ? "重启门卫" : "启动门卫"
 
         let expected = (gate["expected_ip"] as? String) ?? ""
         let observed = (gate["observed_ip"] as? String) ?? ""
@@ -1912,7 +1916,27 @@ final class DashboardWindow: NSObject {
     }
 
     @objc private func onVerify() { run(["gate", "verify"]) }
-    @objc private func onStart() { run(["gate", "start"]) }
+    @objc private func onStart() {
+        let running = gateRunning()
+        statusLine.stringValue = running ? "正在重启门卫（需要管理员授权）…" : "正在启动门卫（需要管理员授权）…"
+        // The gate is a system LaunchDaemon; kickstart both starts and restarts
+        // it, which is exactly the one action this button needs to offer.
+        let command = "launchctl kickstart -k system/com.claudeguard.gate"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", "do shell script \"\(command)\" with administrator privileges"]
+            try? process.run()
+            process.waitUntilExit()
+            let ok = process.terminationStatus == 0
+            DispatchQueue.main.async {
+                self?.statusLine.stringValue = ok
+                    ? (running ? "已重启门卫，等待复检…" : "已启动门卫，等待复检…")
+                    : "已取消（需要管理员授权）"
+                self?.refresh()
+            }
+        }
+    }
     @objc private func onStop() { run(["gate", "stop"]) }
     @objc private func onRefresh() { refresh() }
 
