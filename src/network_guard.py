@@ -56,9 +56,15 @@ EXTERNAL_RESOLVERS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
 # auxiliary page hosted on a shared CDN (e.g. the status page on CloudFront, the
 # trust page on Cloudflare) never drags unrelated sites down with it. Every
 # account-critical domain (claude.ai, app/api/console/auth/login.*) lives here.
+# Source: https://platform.claude.com/docs/en/api/ip-addresses
+#   inbound  IPv4 160.79.104.0/23, 153.61.224.0/22   IPv6 2607:6bc0::/48
+#   outbound IPv4 160.79.104.0/21, 153.61.208.0/20
+# 160.79.104.0/21 already covers the inbound /23; the /48 narrows the old /32.
 ANTHROPIC_NETS = [
-    ipaddress.ip_network("160.79.104.0/24"),
-    ipaddress.ip_network("2607:6bc0::/32"),
+    ipaddress.ip_network("160.79.104.0/21"),
+    ipaddress.ip_network("153.61.208.0/20"),
+    ipaddress.ip_network("153.61.224.0/22"),
+    ipaddress.ip_network("2607:6bc0::/48"),
 ]
 
 # Fallback for when external DNS is unreachable, so pf still has something to drop.
